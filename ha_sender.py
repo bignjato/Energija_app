@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Home Assistant Energy integracija
-Šalje HEP podatke na doma.infobot.cc HA instancu
+Šalje HEP podatke u Home Assistant
 """
 
 import sqlite3
@@ -19,7 +19,7 @@ except ImportError:
     import requests
 
 # ─── Konfiguracija ─────────────────────────────────────────────────────────────
-HA_URL      = os.getenv("HA_URL",   "https://doma.infobot.cc")
+HA_URL      = os.getenv("HA_URL",   "")
 HA_TOKEN    = os.getenv("HA_TOKEN", "YOUR_LONG_LIVED_ACCESS_TOKEN")
 DB_PATH     = Path(os.getenv("DB_PATH", str(Path(__file__).parent / "hep_energy.db")))
 LOG_PATH    = Path(__file__).parent / "ha_sender.log"

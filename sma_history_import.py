@@ -12,13 +12,13 @@ log = logging.getLogger(__name__)
 DB_PATH   = os.environ.get('DB_PATH', '/data/hep_energy.db')
 TOKEN_URL = 'https://login.sma.energy/auth/realms/SMA/protocol/openid-connect/token'
 API_BASE  = 'https://uiapi.sunnyportal.com/api/v1'
-INV1_ID   = '12821155'
-INV2_ID   = '12821156'
+INV1_ID   = os.environ.get('SMA_INV1_ID', '')
+INV2_ID   = os.environ.get('SMA_INV2_ID', '')
 
 def get_token():
     r = requests.post(TOKEN_URL, data={
         'grant_type':'password','client_id':'SPpbeOS',
-        'username':'boris@infobot.hr','password':'qibhib-qywbuJ-1jujji',
+        'username':os.environ.get('SMA_USERNAME',''),'password':os.environ.get('SMA_PASSWORD',''),
         'scope':'openid profile'}, timeout=30)
     r.raise_for_status()
     return r.json()['access_token']

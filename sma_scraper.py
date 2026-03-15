@@ -15,18 +15,18 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 # --- Konfiguracija ---
-SMA_USERNAME   = os.environ.get('SMA_USERNAME', 'boris@infobot.hr')
-SMA_PASSWORD   = os.environ.get('SMA_PASSWORD', 'qibhib-qywbuJ-1jujji')
+SMA_USERNAME   = os.environ.get('SMA_USERNAME', '')
+SMA_PASSWORD   = os.environ.get('SMA_PASSWORD', '')
 SMA_CLIENT_ID  = 'SPpbeOS'
 SMA_TOKEN_URL  = 'https://login.sma.energy/auth/realms/SMA/protocol/openid-connect/token'
 SMA_API_BASE   = 'https://uiapi.sunnyportal.com/api/v1'
 
 # Component IDs
-SMA_PLANT_ID   = '12821140'   # FNE Ignjatović Boris (root, 30kW)
+SMA_PLANT_ID   = os.environ.get('SMA_PLANT_ID', '')
 SMA_HM_ID      = '12821779'   # Home Manager 2.0
 SMA_KUCA_ID    = '12821195'   # Kuća
-SMA_INV1_ID    = '12821155'   # Sunny Tripower 10.0
-SMA_INV2_ID    = '12821156'   # SMA Tripower 20.0
+SMA_INV1_ID    = os.environ.get('SMA_INV1_ID', '')
+SMA_INV2_ID    = os.environ.get('SMA_INV2_ID', '')
 
 DB_PATH = os.environ.get('DB_PATH', '/data/hep_energy.db')
 

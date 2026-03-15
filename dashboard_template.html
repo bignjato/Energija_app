@@ -1,0 +1,1228 @@
+<!DOCTYPE html>
+<html lang="hr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Energetski Monitor — Ignjatović</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:        #080c12;
+  --surface:   #0f1623;
+  --surface2:  #18202e;
+  --border:    #1f2d3d;
+  --text:      #d0dde8;
+  --muted:     #526070;
+  --solar:     #fbbf24;
+  --feed:      #38bdf8;
+  --consume:   #a78bfa;
+  --grid-out:  #f87171;
+  --green:     #34d399;
+  --accent:    #22d3ee;
+  --head: 'IBM Plex Sans', sans-serif;
+  --mono: 'IBM Plex Mono', monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: var(--head); font-size: 14px; min-height: 100vh; }
+
+/* HEADER */
+.header { padding: 16px 28px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; background: var(--surface); }
+.header h1 { font-size: 17px; font-weight: 700; color: #fff; }
+.header p { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.live-pill { display: flex; align-items: center; gap: 8px; background: var(--surface2); border: 1px solid var(--border); padding: 6px 14px; border-radius: 20px; font-size: 12px; color: var(--muted); font-family: var(--mono); }
+.live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); animation: blink 2s infinite; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+/* NAV */
+.nav { display: flex; padding: 0 28px; background: var(--surface); border-bottom: 1px solid var(--border); overflow-x: auto; }
+.tab { padding: 13px 18px; font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; transition: all .15s; user-select: none; }
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* LAYOUT */
+.wrap { padding: 20px 28px; }
+.page { display: none; }
+.page.active { display: block; }
+
+/* NOTICE */
+.notice { background: var(--surface2); border: 1px solid var(--border); border-left: 3px solid var(--solar); border-radius: 8px; padding: 12px 16px; font-size: 13px; color: var(--muted); margin-bottom: 18px; }
+.notice strong { color: var(--solar); }
+
+/* GRID LAYOUTS */
+.g2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 18px; }
+.g3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-bottom: 18px; }
+.g4 { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; margin-bottom: 18px; }
+.g-auto { display: grid; grid-template-columns: repeat(auto-fill, minmax(155px,1fr)); gap: 10px; margin-bottom: 18px; }
+.g-fin  { display: grid; grid-template-columns: repeat(auto-fill, minmax(185px,1fr)); gap: 10px; margin-bottom: 18px; }
+@media(max-width:1100px){.g2,.g3{grid-template-columns:1fr;}}
+@media(max-width:750px){.g4{grid-template-columns:repeat(2,1fr);}}
+
+/* CARD */
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
+.card-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 14px; }
+.full { grid-column: 1 / -1; }
+
+/* LIVE FLOW */
+.flow4 { display: grid; grid-template-columns: repeat(4,1fr); gap: 6px; }
+.fl { text-align: center; }
+.fl-lbl { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+.fl-val { font-family: var(--mono); font-size: 24px; font-weight: 600; line-height: 1; }
+.fl-unit { font-size: 11px; color: var(--muted); margin-top: 3px; font-family: var(--mono); }
+.c-solar   { color: var(--solar); }
+.c-feed    { color: var(--feed); }
+.c-consume { color: var(--consume); }
+.c-grid    { color: var(--grid-out); }
+.c-green   { color: var(--green); }
+.c-muted   { color: var(--muted); }
+.c-acc     { color: var(--accent); }
+
+/* AUTARKY BAR */
+.aut-row { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+.aut-hdr { display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 12px; color: var(--muted); }
+.aut-hdr b { font-family: var(--mono); font-weight: 600; color: var(--green); }
+.aut-bar { height: 5px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+.aut-fill { height: 100%; background: linear-gradient(90deg, var(--solar), var(--green)); border-radius: 3px; transition: width 1s; }
+
+/* KPI */
+.kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+.kpi-lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 5px; }
+.kpi-val { font-family: var(--mono); font-size: 20px; font-weight: 600; color: #fff; }
+.kpi-sub { font-size: 11px; color: var(--muted); margin-top: 3px; }
+.kpi.solar .kpi-val { color: var(--solar); }
+.kpi.feed  .kpi-val { color: var(--feed); }
+.kpi.cons  .kpi-val { color: var(--consume); }
+.kpi.grn   .kpi-val { color: var(--green); }
+.kpi.acc   .kpi-val { color: var(--accent); }
+
+/* CHART CARD */
+.cc { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; margin-bottom: 14px; }
+.cc h3 { font-size: 14px; font-weight: 600; color: #fff; margin-bottom: 3px; }
+.cc .sub { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+.cw { position: relative; }
+.h200 { height: 200px; }
+.h250 { height: 250px; }
+.h300 { height: 300px; }
+
+/* TARIFA */
+.form-section { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px 22px; margin-bottom: 18px; }
+.form-section h3 { font-size: 14px; font-weight: 600; color: #fff; margin-bottom: 16px; }
+.form-row { display: grid; grid-template-columns: repeat(auto-fill,minmax(175px,1fr)); gap: 12px; margin-bottom: 14px; }
+.fg label { display: block; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 5px; }
+.fg input { width: 100%; padding: 9px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 7px; color: var(--text); font-family: var(--mono); font-size: 14px; transition: border-color .2s; }
+.fg input:focus { outline: none; border-color: var(--accent); }
+.btn { padding: 9px 18px; border-radius: 7px; border: none; cursor: pointer; font-family: var(--head); font-size: 13px; font-weight: 600; transition: opacity .15s; }
+.btn:hover { opacity: .85; }
+.btn-primary { background: var(--accent); color: #000; }
+
+/* FIN */
+.fin { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+.fin .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 5px; }
+.fin .val { font-family: var(--mono); font-size: 18px; font-weight: 600; }
+.fin .sub { font-size: 11px; color: var(--muted); margin-top: 3px; }
+.pos { color: var(--green); }
+.neg { color: var(--grid-out); }
+.neu { color: var(--accent); }
+
+/* TABLE */
+.tbl-wrap { overflow-x: auto; max-height: 420px; overflow-y: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--mono); }
+th { font-family: var(--head); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
+td { padding: 9px 12px; border-bottom: 1px solid rgba(31,45,61,0.5); color: var(--text); }
+tr:hover td { background: var(--surface2); }
+
+/* PREPORUKE */
+.preporuke { display: grid; grid-template-columns: repeat(auto-fill,minmax(255px,1fr)); gap: 10px; margin-top: 10px; }
+.prep { border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; background: var(--bg); }
+.prep .ph { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.prep .pt { font-size: 12px; color: var(--muted); line-height: 1.6; }
+
+/* TOAST */
+.toast { position: fixed; bottom: 20px; right: 20px; background: var(--green); color: #000; padding: 10px 18px; border-radius: 8px; font-weight: 600; font-size: 13px; opacity: 0; transform: translateY(8px); transition: all .25s; z-index: 999; }
+.toast.show { opacity: 1; transform: translateY(0); }
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>⚡ Energetski Monitor</h1>
+    <p>Ignjatović Boris · Lukavec · HEP ODS + SMA 30 kWp</p>
+  </div>
+  <div style="display:flex;align-items:center;gap:10px">
+    <select id="syncInterval" onchange="changeSyncInterval()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:6px;font-family:var(--mono);font-size:12px;cursor:pointer">
+      <option value="30">30 sek</option>
+      <option value="60" selected>1 min</option>
+      <option value="300">5 min</option>
+      <option value="600">10 min</option>
+      <option value="0">Ručno</option>
+    </select>
+    <button onclick="load()" style="background:var(--surface2);border:1px solid var(--border);color:var(--accent);padding:6px 14px;border-radius:6px;font-family:var(--mono);font-size:12px;cursor:pointer">⟳ Osvježi</button>
+    <div class="live-pill">
+      <div class="live-dot"></div>
+      <span id="lastUpdate">Učitavanje...</span>
+    </div>
+  </div>
+</div>
+
+<div class="nav">
+  <div class="tab active"  onclick="goTo('pregled',this)">Pregled</div>
+  <div class="tab" onclick="goTo('usporedba',this)">HEP vs SMA</div>
+  <div class="tab" onclick="goTo('financije',this)">Financije</div>
+  <div class="tab" onclick="goTo('racuni',this)">Računi</div>
+  <div class="tab" onclick="goTo('optimalno',this)">Optimalno</div>
+  <div class="tab" onclick="goTo('povijest',this)">Povijest</div>
+</div>
+
+<!-- ============ PREGLED ============ -->
+<div id="page-pregled" class="page active"><div class="wrap">
+
+  <div id="noSmaNotice" class="notice" style="display:none">
+    <strong>Info:</strong> SMA live podaci još nisu dostupni — pokrenite <code>python3 sma_scraper.py</code> na serveru jednom da popuni bazu.
+  </div>
+
+  <div class="g2">
+    <div class="card">
+      <div class="card-title">☀️ SMA — trenutno</div>
+      <div class="flow4">
+        <div class="fl"><div class="fl-lbl">Solarno</div><div class="fl-val c-solar" id="lv-sol">—</div><div class="fl-unit">W</div></div>
+        <div class="fl"><div class="fl-lbl">Potrošnja</div><div class="fl-val c-consume" id="lv-con">—</div><div class="fl-unit">W</div></div>
+        <div class="fl"><div class="fl-lbl">Predaja</div><div class="fl-val c-feed" id="lv-fee">—</div><div class="fl-unit">W</div></div>
+        <div class="fl"><div class="fl-lbl">Iz mreže</div><div class="fl-val c-grid" id="lv-grd">—</div><div class="fl-unit">W</div></div>
+      </div>
+      <div class="aut-row">
+        <div class="aut-hdr"><span>Autarkija</span><b id="lv-aut">—</b></div>
+        <div class="aut-bar"><div class="aut-fill" id="lv-aut-bar" style="width:0"></div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">📅 Danas — zbirno</div>
+      <div class="flow4">
+        <div class="fl"><div class="fl-lbl">HEP potrošnja</div><div class="fl-val c-consume" id="d-hep-p">—</div><div class="fl-unit">kWh</div></div>
+        <div class="fl"><div class="fl-lbl">HEP predaja</div><div class="fl-val c-feed" id="d-hep-m">—</div><div class="fl-unit">kWh</div></div>
+        <div class="fl"><div class="fl-lbl">SMA solar</div><div class="fl-val c-solar" id="d-sma-p">—</div><div class="fl-unit">kWh</div></div>
+        <div class="fl"><div class="fl-lbl">Neto bilanca</div><div class="fl-val" id="d-neto">—</div><div class="fl-unit">kWh</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="g-auto">
+    <div class="kpi cons"><div class="kpi-lbl">Tjedan (pon–dan) · potrošnja</div><div class="kpi-val" id="k-tj-h">—</div><div class="kpi-sub" id="k-tj-h-sub">kWh iz mreže</div></div>
+    <div class="kpi solar"><div class="kpi-lbl">Tjedan (pon–dan) · solar</div><div class="kpi-val" id="k-tj-s">—</div><div class="kpi-sub">kWh</div></div>
+    <div class="kpi feed"><div class="kpi-lbl">Tjedan (pon–dan) · predaja</div><div class="kpi-val" id="k-tj-p">—</div><div class="kpi-sub">kWh</div></div>
+    <div class="kpi grn"><div class="kpi-lbl">Tjedan (pon–dan) · autarkija</div><div class="kpi-val" id="k-tj-a">—</div><div class="kpi-sub">%</div></div>
+    <div class="kpi cons"><div class="kpi-lbl">Zadnjih 7 dana · potrošnja</div><div class="kpi-val" id="k-7d-h">—</div><div class="kpi-sub">kWh iz mreže</div></div>
+    <div class="kpi solar"><div class="kpi-lbl">Zadnjih 7 dana · solar</div><div class="kpi-val" id="k-7d-s">—</div><div class="kpi-sub">kWh</div></div>
+    <div class="kpi feed"><div class="kpi-lbl">Zadnjih 7 dana · predaja</div><div class="kpi-val" id="k-7d-p">—</div><div class="kpi-sub">kWh</div></div>
+    <div class="kpi grn"><div class="kpi-lbl">Zadnjih 7 dana · autarkija</div><div class="kpi-val" id="k-7d-a">—</div><div class="kpi-sub">%</div></div>
+    <div class="kpi cons"><div class="kpi-lbl">Mjesec · potrošnja</div><div class="kpi-val" id="k-mj-h">—</div><div class="kpi-sub">kWh iz mreže</div></div>
+    <div class="kpi solar"><div class="kpi-lbl">Mjesec · solar</div><div class="kpi-val" id="k-mj-s">—</div><div class="kpi-sub">kWh</div></div>
+    <div class="kpi feed"><div class="kpi-lbl">Mjesec · predaja</div><div class="kpi-val" id="k-mj-p">—</div><div class="kpi-sub">kWh</div></div>
+    <div class="kpi acc"><div class="kpi-lbl">Prosj. dan · solar</div><div class="kpi-val" id="k-pr-s">—</div><div class="kpi-sub">kWh / dan</div></div>
+  </div>
+
+  <div class="g2">
+    <div class="cc" style="margin-bottom:0">
+      <h3>Satna energija — 7 dana</h3>
+      <div class="sub">HEP potrošnja + SMA solar</div>
+      <div class="cw h250"><canvas id="cSatni"></canvas></div>
+    </div>
+    <div class="cc" style="margin-bottom:0">
+      <h3>Dnevna bilanca — 30 dana</h3>
+      <div class="sub">Potrošnja / Predaja / Solar</div>
+      <div class="cw h250"><canvas id="cDnevni"></canvas></div>
+    </div>
+  </div>
+
+</div></div>
+
+<!-- ============ USPOREDBA ============ -->
+<div id="page-usporedba" class="page"><div class="wrap">
+
+  <div class="g-auto">
+    <div class="kpi solar"><div class="kpi-lbl">HEP predaja ↔ SMA predaja</div><div class="kpi-val" id="u-pred-d">—</div><div class="kpi-sub">razlika kWh · 30 dana</div></div>
+    <div class="kpi cons"><div class="kpi-lbl">HEP potrošnja ↔ SMA mreža</div><div class="kpi-val" id="u-pot-d">—</div><div class="kpi-sub">razlika kWh · 30 dana</div></div>
+    <div class="kpi grn"><div class="kpi-lbl">Ukupna solar · 30 dana</div><div class="kpi-val" id="u-sol-t">—</div><div class="kpi-sub">kWh po SMA</div></div>
+    <div class="kpi acc"><div class="kpi-lbl">Prosj. autarkija · 30 dana</div><div class="kpi-val" id="u-aut">—</div><div class="kpi-sub">%</div></div>
+  </div>
+
+  <div class="cc">
+    <h3>Usporedba HEP vs SMA — zadnjih 60 dana</h3>
+    <div class="sub">HEP mjerač vs SMA Home Manager · dnevni podaci</div>
+    <div class="cw h300"><canvas id="cUsporedba"></canvas></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Tablica usporedbe — zadnjih 30 dana</div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Datum</th><th>HEP potroš.</th><th>SMA mreža</th><th>Δ potroš.</th>
+          <th>HEP predaja</th><th>SMA predaja</th><th>Δ predaja</th>
+          <th>SMA solar</th><th>Autarkija</th>
+        </tr></thead>
+        <tbody id="tUsporedba"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div></div>
+
+<!-- ============ FINANCIJE ============ -->
+<div id="page-financije" class="page"><div class="wrap">
+
+  <div class="form-section">
+    <h3>⚙️ Tarifa</h3>
+    <div class="form-row">
+      <div class="fg"><label>Naziv tarife</label><input id="fNaz" value="HEP standardna"></div>
+      <div class="fg"><label>Kupnja (€/kWh)</label><input id="fKup" type="number" step="0.001" value="0.12"></div>
+      <div class="fg"><label>Prodaja (€/kWh)</label><input id="fPro" type="number" step="0.001" value="0.065"></div>
+      <div class="fg"><label>VT od (sat)</label><input id="fVtOd" type="number" min="0" max="23" value="7"></div>
+      <div class="fg"><label>VT do (sat)</label><input id="fVtDo" type="number" min="0" max="23" value="21"></div>
+    </div>
+    <button class="btn btn-primary" onclick="saveTarifa()">Spremi tarifu</button>
+    <span id="fStatus" style="margin-left:12px;font-size:12px;color:var(--muted)"></span>
+  </div>
+
+  <div class="g-fin">
+    <div class="fin"><div class="lbl">Trošak · ovaj mj.</div><div class="val neg" id="fn-t-mj">—</div><div class="sub" id="fn-t-mj-k"></div></div>
+    <div class="fin"><div class="lbl">Prihod · ovaj mj.</div><div class="val pos" id="fn-p-mj">—</div><div class="sub" id="fn-p-mj-k"></div></div>
+    <div class="fin"><div class="lbl">Neto ušteda · mj.</div><div class="val pos" id="fn-u-mj">—</div><div class="sub">prihod − trošak</div></div>
+    <div class="fin"><div class="lbl">Bez solara platili bi</div><div class="val neu" id="fn-bez">—</div><div class="sub">ukupna potroš. × cijena</div></div>
+    <div class="fin"><div class="lbl">Trošak · ovaj god.</div><div class="val neg" id="fn-t-god">—</div><div class="sub"></div></div>
+    <div class="fin"><div class="lbl">Prihod · ovaj god.</div><div class="val pos" id="fn-p-god">—</div><div class="sub"></div></div>
+    <div class="fin"><div class="lbl">Neto ušteda · god.</div><div class="val pos" id="fn-u-god">—</div><div class="sub"></div></div>
+    <div class="fin"><div class="lbl">Prosj. dnevni trošak</div><div class="val neu" id="fn-prosj">—</div><div class="sub">zadnjih 30 dana</div></div>
+  </div>
+
+  <!-- PROJEKCIJA -->
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px 22px;margin-bottom:14px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <div>
+        <h3 style="font-size:14px;font-weight:600;color:#fff;">📈 Projekcija do kraja mjeseca</h3>
+        <div style="font-size:12px;color:var(--muted);margin-top:2px;">Na temelju prosjeka dosadašnjih dana u mjesecu</div>
+      </div>
+      <div style="font-size:11px;color:var(--muted);font-family:var(--mono)" id="fn-proj-info"></div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;">
+      <div style="background:var(--bg);border:1px solid var(--border);border-left:3px solid var(--grid-out);border-radius:8px;padding:14px;">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;">Procj. trošak</div>
+        <div style="font-family:var(--mono);font-size:20px;font-weight:600;color:var(--grid-out)" id="fn-proj-trosak">—</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:3px;" id="fn-proj-trosak-kwh"></div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-left:3px solid var(--green);border-radius:8px;padding:14px;">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;">Procj. prihod</div>
+        <div style="font-family:var(--mono);font-size:20px;font-weight:600;color:var(--green)" id="fn-proj-prihod">—</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:3px;" id="fn-proj-prihod-kwh"></div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:8px;padding:14px;">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;">Procj. neto</div>
+        <div style="font-family:var(--mono);font-size:20px;font-weight:600;color:var(--accent)" id="fn-proj-neto">—</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:3px;">prihod − trošak</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-left:3px solid var(--solar);border-radius:8px;padding:14px;">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;">Procj. solar</div>
+        <div style="font-family:var(--mono);font-size:20px;font-weight:600;color:var(--solar)" id="fn-proj-solar">—</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:3px;">kWh do kraja mj.</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-left:3px solid var(--consume);border-radius:8px;padding:14px;">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;">Procj. potrošnja</div>
+        <div style="font-family:var(--mono);font-size:20px;font-weight:600;color:var(--consume)" id="fn-proj-potrosnja">—</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:3px;">kWh do kraja mj.</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-left:3px solid var(--feed);border-radius:8px;padding:14px;">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;">Prošlogodišnji mj.</div>
+        <div style="font-family:var(--mono);font-size:20px;font-weight:600;color:var(--feed)" id="fn-proj-lani">—</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:3px;" id="fn-proj-lani-sub">neto prošle god.</div>
+      </div>
+    </div>
+
+    <!-- Progress bar dana -->
+    <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:12px;color:var(--muted)">
+        <span>Napredak mjeseca</span>
+        <span id="fn-proj-pct" style="font-family:var(--mono);color:var(--accent)"></span>
+      </div>
+      <div style="height:6px;background:var(--surface2);border-radius:3px;overflow:hidden">
+        <div id="fn-proj-bar" style="height:100%;background:linear-gradient(90deg,var(--consume),var(--accent));border-radius:3px;transition:width 1s"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:11px;color:var(--muted)">
+        <span id="fn-proj-od"></span>
+        <span id="fn-proj-do"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="cc">
+    <h3>Mesečni troškovi i prihodi (€)</h3>
+    <div class="sub">Na temelju unesene tarife i HEP podataka · zadnjih 18 mj.</div>
+    <div class="cw h280"><canvas id="cFin"></canvas></div>
+  </div>
+
+</div></div>
+
+<!-- ============ RAČUNI ============ -->
+<div id="page-racuni" class="page"><div class="wrap">
+
+  <div class="kpi-strip">
+    <div class="kpi grn"><div class="kpi-lbl">Ukupno plaćeno (36 mj.)</div><div class="kpi-val" id="r-ukupno">—</div><div class="kpi-sub">procjena s HEP cijenama</div></div>
+    <div class="kpi solar"><div class="kpi-lbl">Ukupno prihod (36 mj.)</div><div class="kpi-val" id="r-prihod">—</div><div class="kpi-sub">od predaje viška</div></div>
+    <div class="kpi acc"><div class="kpi-lbl">Prosj. mjesečni račun</div><div class="kpi-val" id="r-prosj">—</div><div class="kpi-sub">zadnjih 12 mj.</div></div>
+    <div class="kpi cons"><div class="kpi-lbl">Najskuplji mjesec</div><div class="kpi-val" id="r-max">—</div><div class="kpi-sub" id="r-max-sub"></div></div>
+  </div>
+
+  <!-- Unos novog računa -->
+  <div class="form-section" style="margin-bottom:14px">
+    <h3>➕ Dodaj stvarni HEP račun</h3>
+    <div class="form-row" style="grid-template-columns:repeat(auto-fill,minmax(140px,1fr))">
+      <div class="fg"><label>Razdoblje (MM/GGGG)</label><input id="r-period" placeholder="02/2026"></div>
+      <div class="fg"><label>Iznos računa (€)</label><input id="r-iznos" type="number" step="0.01" placeholder="254.72"></div>
+      <div class="fg"><label>Potrošnja VT (kWh)</label><input id="r-vt" type="number" placeholder="489"></div>
+      <div class="fg"><label>Potrošnja NT (kWh)</label><input id="r-nt" type="number" placeholder="1126"></div>
+      <div class="fg"><label>Predaja (kWh)</label><input id="r-predaja" type="number" placeholder="750"></div>
+      <div class="fg"><label>Opskrba (€)</label><input id="r-opskrba" type="number" step="0.01" placeholder="159.01"></div>
+      <div class="fg"><label>Mreža (€)</label><input id="r-mreza" type="number" step="0.01" placeholder="66.41"></div>
+      <div class="fg"><label>PDV (€)</label><input id="r-pdv-iznos" type="number" step="0.01" placeholder="29.30"></div>
+    </div>
+    <button class="btn btn-primary btn-sm" onclick="addRacun()">Spremi račun</button>
+    <span id="r-status" style="margin-left:10px;font-size:12px;color:var(--muted)"></span>
+  </div>
+
+  <!-- Usporedba unesenih računa s procjenom -->
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-title">📄 Uneseni HEP računi — usporedba s procjenom</div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Razdoblje</th><th>Stvarni račun</th><th>Procjena (baza)</th><th>Razlika</th>
+          <th>Potrošnja VT</th><th>Potrošnja NT</th><th>Predaja</th>
+          <th>Opskrba</th><th>Mreža</th><th>PDV</th><th></th>
+        </tr></thead>
+        <tbody id="tRacuniUnos"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="cc">
+    <h3>Procijenjeni račun po mjesecu</h3>
+    <div class="sub">Na temelju HEP ODS podataka i stvarnih cijena · s PDV-om 13%</div>
+    <div class="cw h280"><canvas id="cRacuni"></canvas></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Pregled svih mjeseci</div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Mjesec</th><th>Potrošnja (kWh)</th><th>Predaja (kWh)</th>
+          <th>SMA solar (kWh)</th><th>Autarkija</th>
+          <th>Procj. račun</th><th>Stvarni račun</th><th>Razlika</th>
+        </tr></thead>
+        <tbody id="tRacuni"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div></div>
+
+<!-- ============ OPTIMALNO ============ -->
+<div id="page-optimalno" class="page"><div class="wrap">
+
+  <div class="cc">
+    <h3>☀️ Prosječna solarna snaga po satu dana</h3>
+    <div class="sub">Na temelju SMA mjernih podataka — idealni sati za pokretanje trošila</div>
+    <div class="cw h280"><canvas id="cOptSol"></canvas></div>
+  </div>
+
+  <div class="g2">
+    <div class="cc" style="margin-bottom:0">
+      <h3>Prosječna potrošnja po satu</h3>
+      <div class="sub">Iz HEP mjernih podataka</div>
+      <div class="cw h220"><canvas id="cOptPot"></canvas></div>
+    </div>
+    <div class="cc" style="margin-bottom:0">
+      <h3>Autarkija po satu (%)</h3>
+      <div class="sub">Koliko % potrošnje pokriva solar</div>
+      <div class="cw h220"><canvas id="cOptAut"></canvas></div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="card-title">💡 Preporuke — kada koristiti el. energiju</div>
+    <div class="preporuke" id="prep"></div>
+  </div>
+
+</div></div>
+
+<!-- ============ POVIJEST ============ -->
+<div id="page-povijest" class="page"><div class="wrap">
+
+  <!-- KONTROLE -->
+  <div class="card" style="margin-bottom:14px">
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+      <!-- Brzi izbori -->
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn btn-secondary btn-sm" onclick="brziIzbor('danas')">Danas</button>
+        <button class="btn btn-secondary btn-sm" onclick="brziIzbor('tjedan')">Ovaj tjedan</button>
+        <button class="btn btn-secondary btn-sm" onclick="brziIzbor('7dana')">7 dana</button>
+        <button class="btn btn-secondary btn-sm" onclick="brziIzbor('mj')">Ovaj mj.</button>
+        <button class="btn btn-secondary btn-sm" onclick="brziIzbor('30dana')">30 dana</button>
+        <button class="btn btn-secondary btn-sm" onclick="brziIzbor('god')">Ova god.</button>
+        <button class="btn btn-secondary btn-sm" onclick="brziIzbor('sve')">Sve</button>
+      </div>
+
+      <!-- Separator -->
+      <div style="width:1px;height:24px;background:var(--border)"></div>
+
+      <!-- Date picker -->
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <div class="fg" style="margin:0"><input type="date" id="pov-od" style="padding:6px 10px"></div>
+        <span style="color:var(--muted);font-size:12px">—</span>
+        <div class="fg" style="margin:0"><input type="date" id="pov-do" style="padding:6px 10px"></div>
+      </div>
+
+      <!-- Rezolucija -->
+      <select id="pov-res" onchange="loadPovijest()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 12px;border-radius:6px;font-family:var(--mono);font-size:12px">
+        <option value="day">Dnevno</option>
+        <option value="week">Tjedno</option>
+        <option value="hour">Satno</option>
+      </select>
+
+      <button class="btn btn-primary btn-sm" onclick="loadPovijest()">Prikaži</button>
+    </div>
+  </div>
+
+  <!-- KPI za odabrani period -->
+  <div class="g-auto" id="pov-kpi" style="margin-bottom:14px"></div>
+
+  <!-- GRAFOVI -->
+  <div class="g2" style="margin-bottom:14px">
+    <div class="cc" style="margin-bottom:0">
+      <h3 id="pov-chart1-title">Potrošnja i predaja</h3>
+      <div class="sub" id="pov-chart1-sub">HEP ODS podaci</div>
+      <div class="cw h260"><canvas id="cPov1"></canvas></div>
+    </div>
+    <div class="cc" style="margin-bottom:0">
+      <h3 id="pov-chart2-title">Solarna proizvodnja</h3>
+      <div class="sub">SMA inverteri (Inv1 + Inv2)</div>
+      <div class="cw h260"><canvas id="cPov2"></canvas></div>
+    </div>
+  </div>
+
+  <!-- USPOREDBA DVA PERIODA -->
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+      <span>🔄 Usporedba dva perioda</span>
+      <button class="btn btn-secondary btn-sm" onclick="toggleUsporedba()">Prikaži/Sakrij</button>
+    </div>
+    <div id="usporedba-panel" style="display:none;margin-top:14px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:14px">
+        <div>
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:8px">Period A</div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="date" id="cmp-a-od" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--mono);font-size:12px">
+            <span style="color:var(--muted)">—</span>
+            <input type="date" id="cmp-a-do" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--mono);font-size:12px">
+          </div>
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:8px">Period B</div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="date" id="cmp-b-od" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--mono);font-size:12px">
+            <span style="color:var(--muted)">—</span>
+            <input type="date" id="cmp-b-do" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--mono);font-size:12px">
+          </div>
+        </div>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="loadUsporedba()">Usporedi</button>
+      <div id="cmp-kpi" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-top:14px"></div>
+      <div class="cc" style="margin-top:14px;margin-bottom:0">
+        <h3>Usporedba perioda</h3>
+        <div class="cw h260"><canvas id="cCmp"></canvas></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TABLICA -->
+  <div class="card">
+    <div class="card-title">Detaljna tablica</div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr id="pov-thead"></tr></thead>
+        <tbody id="tPovijest"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div></div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let D=null, OPT=null, CH={};
+
+// ---- NAV ----
+function goTo(name,el){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.getElementById('page-'+name).classList.add('active');
+  el.classList.add('active');
+  if(name==='usporedba') renderUsporedba();
+  if(name==='financije') renderFin();
+  if(name==='racuni'&&!window.RACUNI) loadRacuni();
+  if(name==='optimalno'&&!OPT) loadOpt();
+  if(name==='povijest'&&!POV) { brziIzbor('30dana'); }
+}
+
+// ---- HELPERS ----
+const f0=v=>v==null?'—':(+v).toFixed(0);
+const f1=v=>v==null?'—':(+v).toFixed(1);
+const f2=v=>v==null?'—':(+v).toFixed(2);
+const eur=v=>v==null?'—':(+v).toFixed(2)+' €';
+const sgn=v=>v>=0?'+':'';
+// Lokalni datum - ispravlja timezone (browser je u HR, server u UTC)
+const localDate=(d=new Date())=>{
+  const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), dd=String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${dd}`;
+};
+const today=()=>localDate();
+// Tjedan od ponedjeljka (ISO tjedan)
+const wkS=()=>{const d=new Date(); const day=d.getDay()||7; d.setDate(d.getDate()-day+1); return localDate(d);};
+// Zadnjih 7 dana
+const last7=()=>{const d=new Date(); d.setDate(d.getDate()-6); return localDate(d);};
+const mS=()=>{const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`;};
+const yS=()=>new Date().getFullYear()+'-01-01';
+const sumK=(arr,k)=>arr.reduce((a,b)=>a+(+b[k]||0),0);
+const avgK=(arr,k)=>{const v=arr.filter(r=>r[k]!=null).map(r=>+r[k]);return v.length?v.reduce((a,b)=>a+b)/v.length:0;};
+const set=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v;};
+
+// ---- LOAD ----
+async function load(){
+  try{
+    const r=await fetch('/api/data');
+    D=await r.json();
+    renderPregled();
+    set('lastUpdate', new Date().toLocaleTimeString('hr-HR'));
+  }catch(e){console.error(e);}
+}
+
+async function loadOpt(){
+  try{
+    const r=await fetch('/api/stats/optimalno');
+    OPT=await r.json();
+    renderOpt();
+  }catch(e){console.error(e);}
+}
+
+// ---- PREGLED ----
+function renderPregled(){
+  const hasSma=D.sma_live!=null;
+  document.getElementById('noSmaNotice').style.display=hasSma?'none':'block';
+
+  if(hasSma){
+    const l=D.sma_live;
+    set('lv-sol',f0(l.pv_generation_w));
+    set('lv-con',f0(l.total_consumption_w));
+    set('lv-fee',f0(l.feed_in_w));
+    set('lv-grd',f0(l.external_consumption_w));
+    const a=(l.autarky_rate||0)*100;
+    set('lv-aut',f0(a)+'%');
+    document.getElementById('lv-aut-bar').style.width=Math.min(100,a)+'%';
+  }
+
+  const dH=D.dnevna.find(r=>r.datum===today());
+  const dS=D.sma_dnevna.find(r=>r.datum===today());
+  set('d-hep-p',dH?f1(dH.kwh_plus):'—');
+  set('d-hep-m',dH?f1(dH.kwh_minus):'—');
+  set('d-sma-p',dS?f1(dS.pv_generation_kwh):'—');
+  if(dH){
+    const n=(dH.kwh_minus||0)-(dH.kwh_plus||0);
+    const el=document.getElementById('d-neto');
+    el.textContent=(n>=0?'+':'')+f1(n);
+    el.className='fl-val '+(n>=0?'c-feed':'c-grid');
+  }
+
+  const ws=wkS(), l7=last7(), ms=mS();
+  const tjH=D.dnevna.filter(r=>r.datum>=ws),   tjS=D.sma_dnevna.filter(r=>r.datum>=ws);
+  const d7H=D.dnevna.filter(r=>r.datum>=l7),   d7S=D.sma_dnevna.filter(r=>r.datum>=l7);
+  const mjH=D.dnevna.filter(r=>r.datum>=ms),   mjS=D.sma_dnevna.filter(r=>r.datum>=ms);
+
+  // Tjedan (od ponedjeljka)
+  set('k-tj-h',f1(sumK(tjH,'kwh_plus')));
+  set('k-tj-s',f1(sumK(tjS,'pv_generation_kwh')));
+  set('k-tj-p',f1(sumK(tjH,'kwh_minus')));
+  set('k-tj-a',f0(tjS.length?avgK(tjS,'autarky_rate')*100:0)+'%');
+
+  // Zadnjih 7 dana
+  set('k-7d-h',f1(sumK(d7H,'kwh_plus')));
+  set('k-7d-s',f1(sumK(d7S,'pv_generation_kwh')));
+  set('k-7d-p',f1(sumK(d7H,'kwh_minus')));
+  set('k-7d-a',f0(d7S.length?avgK(d7S,'autarky_rate')*100:0)+'%');
+  // Mjesec
+  set('k-mj-h',f1(sumK(mjH,'kwh_plus')));
+  set('k-mj-s',f1(sumK(mjS,'pv_generation_kwh')));
+  set('k-mj-p',f1(sumK(mjH,'kwh_minus')));
+  const all=D.sma_dnevna.filter(r=>r.pv_generation_kwh>0);
+  set('k-pr-s',f1(all.length?sumK(all,'pv_generation_kwh')/all.length:0));
+
+  mkChart('cSatni','line',D.satna.slice(-96).map(r=>r.ts.slice(11,16)),[
+    {label:'HEP potrošnja (kWh)',data:D.satna.slice(-96).map(r=>r.kwh_plus||0),borderColor:'#a78bfa',backgroundColor:'rgba(167,139,250,.07)',fill:true,tension:.4,pointRadius:0,borderWidth:2},
+    {label:'SMA solar (kWh)',data:D.sma_satna.slice(-96).map(r=>(r.pv_w||0)/1000),borderColor:'#fbbf24',backgroundColor:'rgba(251,191,36,.07)',fill:true,tension:.4,pointRadius:0,borderWidth:2},
+  ],'kWh');
+
+  const h30=D.dnevna.slice(-30);
+  mkChart('cDnevni','bar',h30.map(r=>r.datum.slice(5)),[
+    {label:'Potrošnja',data:h30.map(r=>r.kwh_plus||0),backgroundColor:'rgba(167,139,250,.65)',borderRadius:2},
+    {label:'Predaja',data:h30.map(r=>r.kwh_minus||0),backgroundColor:'rgba(56,189,248,.65)',borderRadius:2},
+    {label:'Solar',data:h30.map(r=>{const s=D.sma_dnevna.find(x=>x.datum===r.datum);return s?s.pv_generation_kwh||0:0;}),type:'line',borderColor:'#fbbf24',fill:false,tension:.4,pointRadius:2,borderWidth:2},
+  ],'kWh');
+}
+
+// ---- USPOREDBA ----
+async function renderUsporedba(){
+  try{
+    const r=await fetch('/api/stats/usporedba');
+    const rows=await r.json();
+    if(!Array.isArray(rows)||!rows.length)return;
+    const l30=rows.slice(-30);
+    const tHP=sumK(l30,'hep_predaja'),tSP=l30.reduce((a,b)=>a+(b.sma_predaja||0),0);
+    const tHK=sumK(l30,'hep_potrosnja'),tSK=l30.reduce((a,b)=>a+(b.sma_mreza||0),0);
+    const tSol=l30.reduce((a,b)=>a+(b.sma_proizvodnja||0),0);
+    const aAut=avgK(l30.filter(r=>r.autarky_rate),'autarky_rate')*100;
+    set('u-pred-d',sgn(tHP-tSP)+f1(tHP-tSP)+' kWh');
+    set('u-pot-d', sgn(tHK-tSK)+f1(tHK-tSK)+' kWh');
+    set('u-sol-t', f1(tSol)+' kWh');
+    set('u-aut',   f0(aAut)+'%');
+
+    const l60=rows.slice(-60);
+    mkChart('cUsporedba','line',l60.map(r=>r.datum.slice(5)),[
+      {label:'HEP potrošnja',data:l60.map(r=>r.hep_potrosnja||0),borderColor:'#a78bfa',pointRadius:0,borderWidth:2,tension:.3},
+      {label:'SMA mreža',data:l60.map(r=>r.sma_mreza||0),borderColor:'#f87171',pointRadius:0,borderWidth:1.5,tension:.3,borderDash:[4,2]},
+      {label:'HEP predaja',data:l60.map(r=>r.hep_predaja||0),borderColor:'#38bdf8',pointRadius:0,borderWidth:2,tension:.3},
+      {label:'SMA solar',data:l60.map(r=>r.sma_proizvodnja||0),borderColor:'#fbbf24',pointRadius:0,borderWidth:2,tension:.3},
+    ],'kWh');
+
+    const tb=document.getElementById('tUsporedba');
+    tb.innerHTML='';
+    l30.slice().reverse().forEach(row=>{
+      const dp=(row.hep_potrosnja||0)-(row.sma_mreza||0);
+      const dr=(row.hep_predaja||0)-(row.sma_predaja||0);
+      tb.innerHTML+=`<tr>
+        <td>${row.datum}</td>
+        <td class="c-consume">${f1(row.hep_potrosnja)}</td><td>${f1(row.sma_mreza)}</td>
+        <td class="${Math.abs(dp)>2?(dp>0?'neg':'pos'):'c-muted'}">${sgn(dp)+f1(dp)}</td>
+        <td class="c-feed">${f1(row.hep_predaja)}</td><td>${f1(row.sma_predaja)}</td>
+        <td class="${Math.abs(dr)>2?(dr>0?'neg':'pos'):'c-muted'}">${sgn(dr)+f1(dr)}</td>
+        <td class="c-solar">${f1(row.sma_proizvodnja)}</td>
+        <td>${row.autarky_rate?f0(row.autarky_rate*100)+'%':'—'}</td>
+      </tr>`;
+    });
+  }catch(e){console.error(e);}
+}
+
+// ---- FINANCIJE ----
+function renderFin(){
+  if(!D)return;
+  const t=D.tarifa;
+  if(t){
+    document.getElementById('fNaz').value=t.naziv;
+    document.getElementById('fKup').value=t.cijena_kupnja;
+    document.getElementById('fPro').value=t.cijena_prodaja;
+    document.getElementById('fVtOd').value=t.vt_pocetak;
+    document.getElementById('fVtDo').value=t.vt_kraj;
+  }
+  calcFin();
+}
+
+function calcFin(){
+  if(!D)return;
+  const cp=+document.getElementById('fKup').value||0.12;
+  const cs=+document.getElementById('fPro').value||0.065;
+  const ms=mS(),ys=yS();
+  const mjH=D.dnevna.filter(r=>r.datum>=ms),godH=D.dnevna.filter(r=>r.datum>=ys);
+  const mjS=D.sma_dnevna.filter(r=>r.datum>=ms);
+  const mK=sumK(mjH,'kwh_plus'),mP=sumK(mjH,'kwh_minus');
+  const gK=sumK(godH,'kwh_plus'),gP=sumK(godH,'kwh_minus');
+  const mSol=sumK(mjS,'pv_generation_kwh');
+  set('fn-t-mj',eur(-mK*cp)); set('fn-t-mj-k',f1(mK)+' kWh');
+  set('fn-p-mj',eur(mP*cs));  set('fn-p-mj-k',f1(mP)+' kWh');
+  set('fn-u-mj',eur(mP*cs-mK*cp));
+  set('fn-bez',eur(-(mK+mSol-mP)*cp));
+  set('fn-t-god',eur(-gK*cp));
+  set('fn-p-god',eur(gP*cs));
+  set('fn-u-god',eur(gP*cs-gK*cp));
+  const l30=D.dnevna.slice(-30);
+  set('fn-prosj',eur(-sumK(l30,'kwh_plus')/30*cp));
+
+  // --- PROJEKCIJA ---
+  const now = new Date();
+  const danasU  = now.getDate();                                          // dan u mjesecu (1-31)
+  const ukupDana = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate(); // ukupno dana u mj.
+  const preostaoDana = ukupDana - danasU;
+  const protekloDana = mjH.length || 1;
+
+  // Prosječni dan u ovom mjesecu
+  const prosj_k  = mK  / protekloDana;  // prosj. kupnja/dan
+  const prosj_p  = mP  / protekloDana;  // prosj. predaja/dan
+  const prosj_sol= mSol / protekloDana; // prosj. solar/dan
+
+  // Projekcija do kraja (trenutno + ostatak)
+  const proj_k   = mK   + prosj_k   * preostaoDana;
+  const proj_p   = mP   + prosj_p   * preostaoDana;
+  const proj_sol = mSol + prosj_sol  * preostaoDana;
+  const proj_t   = proj_k * cp;
+  const proj_pr  = proj_p * cs;
+  const proj_net = proj_pr - proj_t;
+
+  set('fn-proj-trosak',   eur(-proj_t));
+  set('fn-proj-prihod',   eur(proj_pr));
+  set('fn-proj-neto',     eur(proj_net));
+  set('fn-proj-solar',    f1(proj_sol)+' kWh');
+  set('fn-proj-potrosnja', f1(proj_k)+' kWh');
+  set('fn-proj-info',     `Dan ${danasU}/${ukupDana} · još ${preostaoDana} dana`);
+
+  // Prošlogodišnji isti mjesec
+  const laniMj = `${now.getFullYear()-1}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  const laniH = D.dnevna.filter(r=>r.datum.startsWith(laniMj));
+  if(laniH.length){
+    const lK=sumK(laniH,'kwh_plus'), lP=sumK(laniH,'kwh_minus');
+    set('fn-proj-lani', eur(lP*cs - lK*cp));
+    set('fn-proj-lani-sub', `${laniMj} · ${f1(lK)} kWh / ${f1(lP)} kWh`);
+  }
+
+  // Progress bar
+  const pct = Math.round(danasU / ukupDana * 100);
+  set('fn-proj-pct', pct+'%');
+  const bar = document.getElementById('fn-proj-bar');
+  if(bar) bar.style.width = pct+'%';
+  set('fn-proj-od', '1.'+String(now.getMonth()+1).padStart(2,'0')+'.'+now.getFullYear());
+  set('fn-proj-do', ukupDana+'.'+String(now.getMonth()+1).padStart(2,'0')+'.'+now.getFullYear());
+
+  const bm={};
+  D.dnevna.forEach(r=>{const m=r.datum.slice(0,7);if(!bm[m])bm[m]={p:0,mi:0};bm[m].p+=r.kwh_plus||0;bm[m].mi+=r.kwh_minus||0;});
+  const mos=Object.keys(bm).sort().slice(-18);
+  mkChart('cFin','bar',mos,[
+    {label:'Trošak (€)',data:mos.map(m=>-(bm[m].p*cp)),backgroundColor:'rgba(248,113,113,.7)',borderRadius:3},
+    {label:'Prihod (€)',data:mos.map(m=>bm[m].mi*cs),backgroundColor:'rgba(52,211,153,.7)',borderRadius:3},
+    {label:'Neto (€)',data:mos.map(m=>bm[m].mi*cs-bm[m].p*cp),type:'line',borderColor:'#22d3ee',pointRadius:3,borderWidth:2,tension:.3},
+  ],'€');
+}
+
+async function saveTarifa(){
+  const data={naziv:document.getElementById('fNaz').value,cijena_kupnja:document.getElementById('fKup').value,cijena_prodaja:document.getElementById('fPro').value,vt_pocetak:document.getElementById('fVtOd').value,vt_kraj:document.getElementById('fVtDo').value};
+  await fetch('/api/tarifa',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  showToast('Tarifa spremljena!');
+  await load(); renderFin();
+}
+
+// ---- RAČUNI ----
+async function loadRacuni(){
+  try{
+    const r=await fetch('/api/stats/mjesecni');
+    window.RACUNI=await r.json();
+    renderRacuni();
+  }catch(e){console.error(e);}
+}
+
+async function addRacun(){
+  const period = document.getElementById('r-period').value.trim();
+  const iznos  = document.getElementById('r-iznos').value;
+  if(!period||!iznos){ showToast('Unesite barem razdoblje i iznos!'); return; }
+
+  // Konvertiraj MM/GGGG u YYYY-MM
+  const parts = period.split('/');
+  const periodIso = parts.length===2 ? `${parts[1]}-${parts[0].padStart(2,'0')}` : period;
+
+  await fetch('/api/racuni', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      period: periodIso,
+      iznos: +iznos,
+      kwh_vt: +document.getElementById('r-vt').value||null,
+      kwh_nt: +document.getElementById('r-nt').value||null,
+      kwh_plus: (+document.getElementById('r-vt').value||0) + (+document.getElementById('r-nt').value||0),
+      kwh_minus: +document.getElementById('r-predaja').value||null,
+      opskrba: +document.getElementById('r-opskrba').value||null,
+      mreza: +document.getElementById('r-mreza').value||null,
+      pdv: +document.getElementById('r-pdv-iznos').value||null,
+    })
+  });
+  showToast('Račun spremljen!');
+  window.RACUNI = null;
+  loadRacuni();
+}
+
+async function deleteRacun(period){
+  if(!confirm('Obrisati račun '+period+'?')) return;
+  await fetch('/api/racuni?period='+period, {method:'DELETE'});
+  window.RACUNI = null;
+  loadRacuni();
+}
+
+function renderRacuni(){
+  const R=window.RACUNI;
+  if(!R||!R.mjeseci) return;
+  const mj=R.mjeseci.filter(r=>r.hep_potrosnja>0);
+  const racuni=R.racuni||[];
+
+  // KPI iz procjene
+  const ukupno=mj.reduce((a,b)=>a+(b.procj_racun||0),0);
+  const prihod=mj.reduce((a,b)=>a+(b.hep_predaja||0)*0.064379,0);
+  const zadnjih12=mj.slice(0,12);
+  const prosj=zadnjih12.reduce((a,b)=>a+(b.procj_racun||0),0)/Math.max(zadnjih12.length,1);
+  const maxR=mj.reduce((a,b)=>b.procj_racun>a.val?{val:b.procj_racun,mj:b.mjesec}:a,{val:0,mj:''});
+  set('r-ukupno', eur(-ukupno));
+  set('r-prihod', eur(prihod));
+  set('r-prosj', eur(-prosj));
+  set('r-max', eur(-maxR.val));
+  set('r-max-sub', maxR.mj);
+
+  // Tablica unesenih računa
+  const racuniMap = {};
+  racuni.forEach(r => racuniMap[r.period] = r);
+
+  const tb2=document.getElementById('tRacuniUnos');
+  tb2.innerHTML='';
+  if(racuni.length===0){
+    tb2.innerHTML='<tr><td colspan="11" class="c-muted" style="padding:20px;text-align:center">Nema unesenih računa — unesite prvi račun gore</td></tr>';
+  } else {
+    racuni.forEach(r=>{
+      const mjRow = mj.find(m=>m.mjesec===r.period);
+      const procj = mjRow?.procj_racun||0;
+      const diff = procj - r.iznos;
+      const per = r.period.slice(5)+'/'+r.period.slice(0,4);
+      tb2.innerHTML+=`<tr>
+        <td style="font-weight:600">${per}</td>
+        <td class="c-solar">${eur(-r.iznos)}</td>
+        <td>${procj?eur(-procj):'—'}</td>
+        <td class="${Math.abs(diff)<30?'c-green':Math.abs(diff)<80?'c-solar':'neg'}">${procj?sgn(diff)+f2(diff)+' €':'—'}</td>
+        <td>${r.kwh_vt!=null?r.kwh_vt+' kWh':'—'}</td>
+        <td>${r.kwh_nt!=null?r.kwh_nt+' kWh':'—'}</td>
+        <td class="c-feed">${r.kwh_minus!=null?r.kwh_minus+' kWh':'—'}</td>
+        <td>${r.opskrba!=null?eur(-r.opskrba):'—'}</td>
+        <td>${r.mreza!=null?eur(-r.mreza):'—'}</td>
+        <td>${r.pdv!=null?eur(-r.pdv):'—'}</td>
+        <td><button onclick="deleteRacun('${r.period}')" style="background:none;border:none;color:var(--grid-out);cursor:pointer;font-size:14px">✕</button></td>
+      </tr>`;
+    });
+  }
+
+  // Graf
+  const last24=mj.slice(0,24).reverse();
+  mkChart('cRacuni','bar',last24.map(r=>r.mjesec),[
+    {label:'Procj. račun (€)',data:last24.map(r=>-(r.procj_racun||0)),backgroundColor:'rgba(248,113,113,.7)',borderRadius:3},
+    {label:'Stvarni račun (€)',data:last24.map(r=>{const rc=racuniMap[r.mjesec];return rc?-rc.iznos:null;}),backgroundColor:'rgba(251,191,36,.8)',borderRadius:3},
+    {label:'Prihod predaja (€)',data:last24.map(r=>(r.hep_predaja||0)*0.064379),backgroundColor:'rgba(52,211,153,.7)',borderRadius:3},
+  ],'€');
+
+  // Tablica svih mjeseci
+  const tb=document.getElementById('tRacuni');
+  tb.innerHTML='';
+  mj.forEach(row=>{
+    const rc=racuniMap[row.mjesec];
+    const diff=rc ? row.procj_racun-rc.iznos : null;
+    tb.innerHTML+=`<tr>
+      <td style="font-weight:600">${row.mjesec}</td>
+      <td class="c-consume">${f1(row.hep_potrosnja)}</td>
+      <td class="c-feed">${f1(row.hep_predaja)}</td>
+      <td class="c-solar">${row.sma_pv!=null?f1(row.sma_pv):'—'}</td>
+      <td class="c-muted">${row.sma_autarkija!=null?f0(row.sma_autarkija)+'%':'—'}</td>
+      <td class="neg">${eur(-row.procj_racun)}</td>
+      <td class="${rc?'c-solar':'c-muted'}">${rc?eur(-rc.iznos):'—'}</td>
+      <td class="${diff!=null?(Math.abs(diff)<30?'c-green':Math.abs(diff)<80?'c-solar':'neg'):'c-muted'}">${diff!=null?sgn(diff)+f2(diff)+' €':'—'}</td>
+    </tr>`;
+  });
+}
+
+// ---- OPTIMALNO ----
+function renderOpt(){
+  if(!OPT)return;
+  const hrs=Array.from({length:24},(_,i)=>i);
+  const lbl=hrs.map(h=>h.toString().padStart(2,'0')+'h');
+  const sH={};OPT.sma_satno.forEach(r=>sH[r.sat]=r);
+  const hH={};OPT.hep_satno.forEach(r=>hH[r.sat]=r);
+  const sol=hrs.map(h=>sH[h]?.prosj_pv_w||0);
+  const pot=hrs.map(h=>hH[h]?.prosj_potrosnja||0);
+  const aut=hrs.map(h=>(sH[h]?.prosj_autarkija||0)*100);
+  const mx=Math.max(...sol,.001);
+
+  mkChart('cOptSol','bar',lbl,[{
+    label:'Prosj. solar (kW)',data:sol,
+    backgroundColor:hrs.map((_,h)=>`rgba(251,191,36,${.15+sol[h]/mx*.8})`),borderRadius:4,
+  }],'kW');
+
+  mkChart('cOptPot','bar',lbl,[{label:'Prosj. potrošnja (kWh)',data:pot,backgroundColor:'rgba(167,139,250,.6)',borderRadius:3}],'kWh');
+  mkChart('cOptAut','line',lbl,[{label:'Autarkija (%)',data:aut,borderColor:'#34d399',backgroundColor:'rgba(52,211,153,.1)',fill:true,tension:.4,pointRadius:3,borderWidth:2}],'%');
+
+  const top3=[...sol].map((v,i)=>({v,i})).sort((a,b)=>b.v-a.v).slice(0,3);
+  const highAut=hrs.filter(h=>aut[h]>70);
+  const prep=document.getElementById('prep');
+  prep.innerHTML='';
+  const add=(ik,naz,op,boja)=>{prep.innerHTML+=`<div class="prep" style="border-left:3px solid ${boja}"><div class="ph" style="color:${boja}">${ik} ${naz}</div><div class="pt">${op}</div></div>`;};
+  add('☀️',`Vršna solar — ${top3[0].i}h`,`Prosj. ${f1(top3[0].v)} kW · idealno za perilicu, sušilicu, punjač EV.`,'#fbbf24');
+  if(top3[1]) add('🌤️',`Dobra solar — ${top3[1].i}h`,`Prosj. ${f1(top3[1].v)} kW · pokrenite veće trošače.`,'#e8a000');
+  if(top3[2]) add('⛅',`OK solar — ${top3[2].i}h`,`Prosj. ${f1(top3[2].v)} kW · još uvijek isplativo.`,'#b45309');
+  if(highAut.length) add('🔋','Visoka autarkija',`Sati ${highAut.map(h=>h+'h').join(', ')} — prosj. >70% solarnog pokrivanja. Minimalni troškovi kupnje.`,'#34d399');
+  const nocni=[0,1,2,3,4,5,22,23];
+  const nocPot=nocni.reduce((a,h)=>a+(pot[h]||0),0)/nocni.length;
+  add('🌙','Noćna potrošnja',`22h–6h: prosj. ${f2(nocPot)} kWh/sat iz mreže. Izbjegavajte velike trošače (perilica, sušilica).`,'#526070');
+  const cheapH=hrs.filter(h=>sol[h]>mx*0.5);
+  if(cheapH.length) add('💰','Najjeftiniji sati',`${cheapH.map(h=>h+'h').join(', ')} — solar >50% vršne. Koristite vlastitu energiju umjesto da je šaljete u mrežu.`,'#38bdf8');
+}
+
+// ---- POVIJEST ----
+let POV = null;
+
+function toggleUsporedba(){
+  const p=document.getElementById('usporedba-panel');
+  p.style.display=p.style.display==='none'?'block':'none';
+}
+
+function brziIzbor(tip){
+  const now=new Date();
+  let od, doo=localDate();
+  switch(tip){
+    case 'danas':  od=localDate(); break;
+    case 'tjedan': { const d=new Date();const day=d.getDay()||7;d.setDate(d.getDate()-day+1);od=localDate(d); break; }
+    case '7dana':  { const d=new Date();d.setDate(d.getDate()-6);od=localDate(d); break; }
+    case 'mj':     od=mS(); break;
+    case '30dana': { const d=new Date();d.setDate(d.getDate()-29);od=localDate(d); break; }
+    case 'god':    od=yS(); break;
+    case 'sve':    od='2022-01-01'; break;
+    default: od=mS();
+  }
+  document.getElementById('pov-od').value=od;
+  document.getElementById('pov-do').value=doo;
+
+  // Automatski postavi rezoluciju
+  const days=(new Date(doo)-new Date(od))/(1000*86400);
+  const resEl=document.getElementById('pov-res');
+  if(tip==='danas') resEl.value='hour';
+  else if(days<=14) resEl.value='day';
+  else if(days<=90) resEl.value='day';
+  else resEl.value='week';
+
+  loadPovijest();
+}
+
+async function loadPovijest(){
+  const od  = document.getElementById('pov-od').value || localDate(new Date(Date.now()-30*86400000));
+  const doo = document.getElementById('pov-do').value || localDate();
+  const res = document.getElementById('pov-res').value || 'day';
+  if(!od||!doo) return;
+
+  try{
+    const r=await fetch(`/api/povijest?od=${od}&do=${doo}&res=${res}`);
+    POV=await r.json();
+    renderPovijest();
+  }catch(e){console.error(e);}
+}
+
+function renderPovijest(){
+  if(!POV) return;
+  const {hep,sma,res,od,do:doo}=POV;
+
+  // Merge hep i sma po datumu/tjednu
+  const smaMap={};
+  sma.forEach(r=>smaMap[r.datum||r.tjedan||r.sat]=r);
+
+  // Labeli
+  const keyField = res==='hour'?'ts':res==='week'?'datum_od':'datum';
+  const labels = hep.map(r=>{
+    const k=r[keyField]||r.tjedan||r.sat;
+    if(!k) return '—';
+    if(res==='hour') return k.slice(11,16);
+    if(res==='week') return k.slice(5);
+    return k.slice(5);
+  });
+
+  // KPI za period
+  const totP=hep.reduce((a,b)=>a+(b.kwh_plus||0),0);
+  const totM=hep.reduce((a,b)=>a+(b.kwh_minus||0),0);
+  const totSol=sma.reduce((a,b)=>a+(b.pv_kwh||b.pv_generation_kwh||0),0);
+  const neto=totM-totP;
+  const t=D?.tarifa;
+  const cp=t?.cijena_kupnja||0.12, cs=t?.cijena_prodaja||0.065;
+  const finNeto=totM*cs-totP*cp;
+
+  document.getElementById('pov-kpi').innerHTML=`
+    <div class="kpi cons"><div class="kpi-lbl">Potrošnja iz mreže</div><div class="kpi-val c-consume">${f1(totP)}</div><div class="kpi-sub">kWh</div></div>
+    <div class="kpi feed"><div class="kpi-lbl">Predaja u mrežu</div><div class="kpi-val c-feed">${f1(totM)}</div><div class="kpi-sub">kWh</div></div>
+    <div class="kpi solar"><div class="kpi-lbl">Solar (SMA)</div><div class="kpi-val c-solar">${f1(totSol)}</div><div class="kpi-sub">kWh</div></div>
+    <div class="kpi ${neto>=0?'grn':'cons'}"><div class="kpi-lbl">Neto bilanca</div><div class="kpi-val ${neto>=0?'c-green':'c-grid'}">${sgn(neto)+f1(neto)}</div><div class="kpi-sub">kWh</div></div>
+    <div class="kpi ${finNeto>=0?'grn':'cons'}"><div class="kpi-lbl">Financijski neto</div><div class="kpi-val ${finNeto>=0?'pos':'neg'}">${eur(finNeto)}</div><div class="kpi-sub">prihod − trošak</div></div>
+    <div class="kpi acc"><div class="kpi-lbl">Period</div><div class="kpi-val" style="font-size:14px">${hep.length} ${res==='hour'?'sati':res==='week'?'tjedana':'dana'}</div><div class="kpi-sub">${od} — ${doo}</div></div>
+  `;
+
+  // Graf 1 - HEP
+  const unitLabel = res==='hour'?'kWh/h':'kWh';
+  mkChart('cPov1', res==='hour'?'line':'bar', labels, [
+    {label:'Potrošnja',data:hep.map(r=>r.kwh_plus||0),
+     backgroundColor:'rgba(167,139,250,.65)',borderColor:'#a78bfa',
+     borderRadius:2,fill:res==='hour',tension:.3,pointRadius:res==='hour'?0:undefined},
+    {label:'Predaja',data:hep.map(r=>r.kwh_minus||0),
+     backgroundColor:'rgba(56,189,248,.65)',borderColor:'#38bdf8',
+     borderRadius:2,fill:res==='hour',tension:.3,pointRadius:res==='hour'?0:undefined},
+  ], unitLabel);
+
+  // Graf 2 - SMA solar
+  const smaLabels = res==='hour'
+    ? hep.map(r=>{ const k=r.ts||r.sat; return k?k.slice(11,16):''; })
+    : hep.map(r=>r[keyField]||'').map(k=>k.slice(5));
+
+  const smaPv = hep.map(r=>{
+    const k=r[keyField]||r.tjedan||r.sat;
+    const s=smaMap[k]||smaMap[k?.slice(0,10)];
+    return s?(s.pv_kwh||s.pv_generation_kwh||0):0;
+  });
+  const smaInv1 = hep.map(r=>{
+    const k=r[keyField]||r.tjedan||r.sat;
+    const s=smaMap[k]||smaMap[k?.slice(0,10)];
+    return s?(s.inv1_kwh||s.pv_kwh_inv1||0):0;
+  });
+  const smaInv2 = hep.map(r=>{
+    const k=r[keyField]||r.tjedan||r.sat;
+    const s=smaMap[k]||smaMap[k?.slice(0,10)];
+    return s?(s.inv2_kwh||s.pv_kwh_inv2||0):0;
+  });
+
+  mkChart('cPov2', res==='hour'?'line':'bar', labels, [
+    {label:'Inv1 (10kW)',data:smaInv1,backgroundColor:'rgba(251,191,36,.5)',borderColor:'#f59e0b',borderRadius:2,tension:.3,pointRadius:0},
+    {label:'Inv2 (20kW)',data:smaInv2,backgroundColor:'rgba(251,191,36,.8)',borderColor:'#fbbf24',borderRadius:2,tension:.3,pointRadius:0},
+    {label:'Ukupno solar',data:smaPv,type:'line',borderColor:'#fbbf24',pointRadius:0,borderWidth:2,tension:.3},
+  ], unitLabel);
+
+  // Tablica
+  const thead=document.getElementById('pov-thead');
+  thead.innerHTML = res==='week'
+    ? '<th>Tjedan</th><th>Od</th><th>Potrošnja</th><th>Predaja</th><th>Solar</th><th>Dana</th><th>Neto bilanca</th>'
+    : res==='hour'
+    ? '<th>Sat</th><th>Potrošnja (kWh)</th><th>Predaja (kWh)</th><th>Solar (kWh)</th>'
+    : '<th>Datum</th><th>Potrošnja (kWh)</th><th>Predaja (kWh)</th><th>Solar (kWh)</th><th>Inv1</th><th>Inv2</th><th>Neto bilanca</th>';
+
+  const tb=document.getElementById('tPovijest');
+  tb.innerHTML='';
+  hep.forEach(row=>{
+    const k=row[keyField]||row.tjedan||row.sat;
+    const s=smaMap[k]||smaMap[k?.slice(0,10)];
+    const pv=s?(s.pv_kwh||s.pv_generation_kwh||0):0;
+    const inv1=s?(s.inv1_kwh||s.pv_kwh_inv1||0):0;
+    const inv2=s?(s.inv2_kwh||s.pv_kwh_inv2||0):0;
+    const n=(row.kwh_minus||0)-(row.kwh_plus||0);
+
+    if(res==='week'){
+      tb.innerHTML+=`<tr>
+        <td style="font-weight:600">${row.tjedan}</td>
+        <td class="c-muted">${row.datum_od||''}</td>
+        <td class="c-consume">${f1(row.kwh_plus)}</td>
+        <td class="c-feed">${f1(row.kwh_minus)}</td>
+        <td class="c-solar">${pv?f1(pv):'—'}</td>
+        <td class="c-muted">${row.n_dana}</td>
+        <td class="${n>=0?'pos':'neg'}">${sgn(n)+f1(n)}</td>
+      </tr>`;
+    } else if(res==='hour'){
+      const ts=row.ts||row.sat;
+      tb.innerHTML+=`<tr>
+        <td style="font-family:var(--mono)">${ts?ts.slice(0,16):''}</td>
+        <td class="c-consume">${f2(row.kwh_plus)}</td>
+        <td class="c-feed">${f2(row.kwh_minus)}</td>
+        <td class="c-solar">${pv?f2(pv):'—'}</td>
+      </tr>`;
+    } else {
+      tb.innerHTML+=`<tr>
+        <td style="font-weight:600">${row.datum}</td>
+        <td class="c-consume">${f1(row.kwh_plus)}</td>
+        <td class="c-feed">${f1(row.kwh_minus)}</td>
+        <td class="c-solar">${pv?f1(pv):'—'}</td>
+        <td class="c-muted">${inv1?f1(inv1):'—'}</td>
+        <td class="c-muted">${inv2?f1(inv2):'—'}</td>
+        <td class="${n>=0?'pos':'neg'}">${sgn(n)+f1(n)}</td>
+      </tr>`;
+    }
+  });
+}
+
+async function loadUsporedba(){
+  const aOd=document.getElementById('cmp-a-od').value;
+  const aDo=document.getElementById('cmp-a-do').value;
+  const bOd=document.getElementById('cmp-b-od').value;
+  const bDo=document.getElementById('cmp-b-do').value;
+  if(!aOd||!aDo||!bOd||!bDo) return;
+
+  const [rA, rB] = await Promise.all([
+    fetch(`/api/povijest?od=${aOd}&do=${aDo}&res=day`).then(r=>r.json()),
+    fetch(`/api/povijest?od=${bOd}&do=${bDo}&res=day`).then(r=>r.json()),
+  ]);
+
+  const sumA={p:0,m:0,sol:0}, sumB={p:0,m:0,sol:0};
+  rA.hep.forEach(r=>{sumA.p+=r.kwh_plus||0;sumA.m+=r.kwh_minus||0;});
+  rA.sma.forEach(r=>{sumA.sol+=r.pv_generation_kwh||0;});
+  rB.hep.forEach(r=>{sumB.p+=r.kwh_plus||0;sumB.m+=r.kwh_minus||0;});
+  rB.sma.forEach(r=>{sumB.sol+=r.pv_generation_kwh||0;});
+
+  const kpi=document.getElementById('cmp-kpi');
+  const diff=(a,b,inv=false)=>{
+    const d=a-b; const pct=b>0?d/b*100:0;
+    const cls=inv?(d>0?'neg':'pos'):(d>0?'pos':'neg');
+    return `<span class="${cls}">${sgn(d)+f1(d)} (${sgn(pct)+f0(pct)}%)</span>`;
+  };
+  kpi.innerHTML=`
+    <div class="fin"><div class="lbl">Potrošnja A</div><div class="val c-consume">${f1(sumA.p)} kWh</div></div>
+    <div class="fin"><div class="lbl">Potrošnja B</div><div class="val c-consume">${f1(sumB.p)} kWh</div><div class="sub">vs A: ${diff(sumB.p,sumA.p,true)}</div></div>
+    <div class="fin"><div class="lbl">Solar A</div><div class="val c-solar">${f1(sumA.sol)} kWh</div></div>
+    <div class="fin"><div class="lbl">Solar B</div><div class="val c-solar">${f1(sumB.sol)} kWh</div><div class="sub">vs A: ${diff(sumB.sol,sumA.sol)}</div></div>
+    <div class="fin"><div class="lbl">Predaja A</div><div class="val c-feed">${f1(sumA.m)} kWh</div></div>
+    <div class="fin"><div class="lbl">Predaja B</div><div class="val c-feed">${f1(sumB.m)} kWh</div><div class="sub">vs A: ${diff(sumB.m,sumA.m)}</div></div>
+  `;
+
+  // Graf usporedbe - normalizirano po danu
+  const nA=rA.hep.length||1, nB=rB.hep.length||1;
+  mkChart('cCmp','bar',['Potrošnja /dan','Solar /dan','Predaja /dan'],[
+    {label:`Period A (${aOd} — ${aDo})`,data:[sumA.p/nA,sumA.sol/nA,sumA.m/nA],backgroundColor:'rgba(56,189,248,.7)',borderRadius:4},
+    {label:`Period B (${bOd} — ${bDo})`,data:[sumB.p/nB,sumB.sol/nB,sumB.m/nB],backgroundColor:'rgba(251,191,36,.7)',borderRadius:4},
+  ],'kWh/dan');
+}
+
+// ---- CHART FACTORY ----
+function mkChart(id,type,labels,datasets,unit){
+  if(CH[id])CH[id].destroy();
+  CH[id]=new Chart(document.getElementById(id).getContext('2d'),{
+    type,data:{labels,datasets},
+    options:{
+      responsive:true,maintainAspectRatio:false,
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{labels:{color:'#526070',font:{family:'IBM Plex Sans',size:11},boxWidth:10,padding:12}},
+        tooltip:{backgroundColor:'#0f1623',borderColor:'#1f2d3d',borderWidth:1,titleColor:'#d0dde8',bodyColor:'#526070',padding:10,
+          callbacks:{label:c=>` ${c.dataset.label}: ${(+c.parsed.y).toFixed(2)} ${unit}`}
+        }
+      },
+      scales:{
+        x:{grid:{color:'rgba(31,45,61,.5)'},ticks:{color:'#526070',font:{family:'IBM Plex Mono',size:11},maxTicksLimit:12}},
+        y:{grid:{color:'rgba(31,45,61,.5)'},ticks:{color:'#526070',font:{family:'IBM Plex Mono',size:11}}},
+      }
+    }
+  });
+}
+
+// ---- TOAST ----
+function showToast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3000);}
+
+let syncTimer = null;
+
+function changeSyncInterval() {
+  const sek = +document.getElementById('syncInterval').value;
+  if (syncTimer) clearInterval(syncTimer);
+  if (sek > 0) syncTimer = setInterval(load, sek * 1000);
+}
+
+load();
+syncTimer = setInterval(load, 60000);
+</script>
+</body>
+</html>
