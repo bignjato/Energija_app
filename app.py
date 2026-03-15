@@ -12,6 +12,10 @@ app = Flask(__name__)
 DB_PATH    = os.environ.get('DB_PATH', '/data/hep_energy.db')
 TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'dashboard_template.html')
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
+app.config['SESSION_COOKIE_SECURE'] = False
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['PERMANENT_SESSION_LIFETIME'] = 86400 * 30
 
 # ===== BAZA — INICIJALIZACIJA =====
 
@@ -511,6 +515,10 @@ import hashlib, secrets, functools
 from flask import session, redirect
 
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
+app.config['SESSION_COOKIE_SECURE'] = False
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['PERMANENT_SESSION_LIFETIME'] = 86400 * 30
 LOGIN_PASSWORD = os.environ.get('DASHBOARD_PASSWORD', '')
 
 LOGIN_PAGE = '''<!DOCTYPE html>
@@ -1066,3 +1074,44 @@ def api_sync_ha():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
+
+@app.route('/health')
+def health():
+    return 'OK', 200
+
+
+@app.route('/api/setup/import-hep', methods=['POST'])
+def api_import_hep():
+    import subprocess
+    dani = request.args.get('dani', '30')
+    try:
+        result = subprocess.run(
+            ['python3', '/app/hep_scraper.py', '--dani', str(dani)],
+            capture_output=True, text=True, timeout=300
+        )
+        lines = (result.stdout + result.stderr).strip().split('\n')
+        info = lines[-1] if lines else 'Gotovo'
+        return jsonify({'ok': True, 'info': info})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
+
+
+@app.route('/health')
+def health():
+    return 'OK', 200
+
+
+@app.route('/api/setup/import-hep', methods=['POST'])
+def api_import_hep():
+    import subprocess
+    dani = request.args.get('dani', '30')
+    try:
+        result = subprocess.run(
+            ['python3', '/app/hep_scraper.py', '--dani', str(dani)],
+            capture_output=True, text=True, timeout=300
+        )
+        lines = (result.stdout + result.stderr).strip().split('\n')
+        info = lines[-1] if lines else 'Gotovo'
+        return jsonify({'ok': True, 'info': info})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
