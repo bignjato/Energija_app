@@ -152,6 +152,8 @@ def izracunaj_racun(kwh_plus, kwh_minus, n_dana=30):
     osnovica = opskrba + mreza
     return round(osnovica * (1 + t['pdv']), 2)
 
+
+def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
