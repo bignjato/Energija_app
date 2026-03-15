@@ -1,0 +1,36 @@
+services:
+
+  hep-web:
+    build: .
+    container_name: hep-energy-web
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DB_PATH=/data/hep_energy.db
+    volumes:
+      - hep-data:/data
+    ports:
+      - "5000:5000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  hep-sync:
+    build: .
+    container_name: hep-energy-sync
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DB_PATH=/data/hep_energy.db
+    volumes:
+      - hep-data:/data
+    command: ["/bin/sh", "/app/sync_loop.sh"]
+    depends_on:
+      - hep-web
+
+volumes:
+  hep-data:
+    driver: local
