@@ -153,7 +153,9 @@ MIT License — slobodno koristite, modificirajte i distribuirajte.
 vl. Boris Ignjatović
 
 - 🌐 [infobot.hr](https://infobot.hr)
-- ✉️ boris@infobot.hr
+- ✉️ info@infobot.hr
+- 📞 +385 91 6234446
+- 📍 Starogradska 14, 10412 Lukavec
 - 💻 IT održavanje
 - 🏠 Pametne kuće  
 - 🖨️ 3D printanje

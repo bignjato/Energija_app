@@ -558,7 +558,7 @@ button:hover{opacity:.9}
     <button type="submit">→ Prijava</button>
   </form>
   <hr class="divider">
-  <div class="footer">© 2024 InfoBot · energija.infobot.hr</div>
+  <div class="footer">© 2024 InfoBot · Starogradska 14, 10412 Lukavec · info@infobot.hr · +385 91 6234446</div>
 </div>
 <script>if(window.location.search.includes('err'))document.getElementById('err').style.display='block'</script>
 </body></html>'''
