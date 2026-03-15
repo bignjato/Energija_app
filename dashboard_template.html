@@ -22,6 +22,23 @@
   --accent:    #22d3ee;
   --head: 'IBM Plex Sans', sans-serif;
   --mono: 'IBM Plex Mono', monospace;
+  --shadow: 0 4px 24px rgba(0,0,0,0.4);
+}
+
+[data-theme="light"] {
+  --bg:        #f0f4f8;
+  --surface:   #ffffff;
+  --surface2:  #e8edf2;
+  --border:    #d0dae4;
+  --text:      #1a2535;
+  --muted:     #7a8fa6;
+  --solar:     #d97706;
+  --feed:      #0284c7;
+  --consume:   #7c3aed;
+  --grid-out:  #dc2626;
+  --green:     #059669;
+  --accent:    #0891b2;
+  --shadow: 0 4px 24px rgba(0,0,0,0.1);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -150,22 +167,32 @@ tr:hover td { background: var(--surface2); }
 <body>
 
 <div class="header">
-  <div>
-    <h1>⚡ Energetski Monitor</h1>
-    <p>Ignjatović Boris · Lukavec · HEP ODS + SMA 30 kWp</p>
+  <div style="display:flex;align-items:center;gap:0">
+    <a href="https://infobot.hr" target="_blank" style="text-decoration:none;display:flex;align-items:center;gap:10px;padding-right:14px;border-right:1px solid var(--border)">
+      <div>
+        <div style="font-family:'IBM Plex Sans',sans-serif;font-weight:900;font-size:20px;letter-spacing:-0.5px;line-height:1"><span style="color:#00d4ff">INFO</span><span style="color:#e63329">BOT</span></div>
+        <div style="font-size:9px;color:var(--muted);line-height:1.4;margin-top:2px">💻 IT · 🏠 Pametne kuće · 🖨️ 3D print</div>
+      </div>
+    </a>
+    <div style="display:flex;flex-direction:column;gap:2px;padding:0 12px;border-right:1px solid var(--border);font-size:10px;font-family:var(--mono)">
+      <a href="https://infobot.hr" target="_blank" style="color:var(--accent);text-decoration:none">🌐 infobot.hr</a>
+      <a href="mailto:boris@infobot.hr" style="color:var(--muted);text-decoration:none">✉ boris@infobot.hr</a>
+    </div>
+    <div style="padding-left:12px">
+      <h1 style="font-size:14px;font-weight:700;color:var(--text);line-height:1.2">⚡ Energetski Monitor</h1>
+      <p style="font-size:10px;color:var(--muted);margin-top:2px">Boris Ignjatović · Lukavec · HEP ODS + SMA 30 kWp</p>
+    </div>
   </div>
-  <div style="display:flex;align-items:center;gap:10px">
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    <button id="themeToggle" onclick="toggleTheme()" title="Promijeni temu" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:8px;cursor:pointer;font-size:16px;line-height:1">🌙</button>
     <select id="syncInterval" onchange="changeSyncInterval()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:6px;font-family:var(--mono);font-size:12px;cursor:pointer">
-      <option value="30">30 sek</option>
-      <option value="60" selected>1 min</option>
-      <option value="300">5 min</option>
-      <option value="600">10 min</option>
-      <option value="0">Ručno</option>
+      <option value="30">30 sek</option><option value="60" selected>1 min</option><option value="300">5 min</option><option value="600">10 min</option><option value="0">Ručno</option>
     </select>
     <button onclick="load()" style="background:var(--surface2);border:1px solid var(--border);color:var(--accent);padding:6px 14px;border-radius:6px;font-family:var(--mono);font-size:12px;cursor:pointer">⟳ Osvježi</button>
-    <div class="live-pill">
-      <div class="live-dot"></div>
-      <span id="lastUpdate">Učitavanje...</span>
+    <div class="live-pill"><div class="live-dot"></div><span id="lastUpdate">Učitavanje...</span></div>
+    <div style="display:flex;align-items:center;gap:6px;padding-left:8px;border-left:1px solid var(--border)">
+      <span id="header-user" style="font-size:11px;color:var(--muted);font-family:var(--mono)"></span>
+      <a href="/logout" title="Odjava" style="background:none;border:1px solid var(--border);color:var(--muted);padding:5px 10px;border-radius:6px;font-size:12px;text-decoration:none;font-family:var(--mono)" onmouseover="this.style.color='var(--grid-out)'" onmouseout="this.style.color='var(--muted)'">⎋</a>
     </div>
   </div>
 </div>
@@ -177,6 +204,7 @@ tr:hover td { background: var(--surface2); }
   <div class="tab" onclick="goTo('racuni',this)">Računi</div>
   <div class="tab" onclick="goTo('optimalno',this)">Optimalno</div>
   <div class="tab" onclick="goTo('povijest',this)">Povijest</div>
+  <div class="tab" onclick="goTo('postavke',this)">⚙️ Postavke</div>
 </div>
 
 <!-- ============ PREGLED ============ -->
@@ -561,6 +589,157 @@ tr:hover td { background: var(--surface2); }
 
 </div></div>
 
+<!-- ============ POSTAVKE ============ -->
+<div id="page-postavke" class="page"><div class="wrap">
+
+  <!-- STATUS SUSTAVA -->
+  <div class="g-auto" id="status-kpi" style="margin-bottom:14px"></div>
+
+  <!-- KONFIGURACIJA -->
+  <div class="form-section" style="margin-bottom:14px">
+    <h3>🔧 Konfiguracija</h3>
+
+    <!-- HEP -->
+    <div class="optional-section" style="margin-bottom:10px">
+      <div class="optional-header" onclick="toggleOptSec('hep-cfg')">
+        <h3>🏭 HEP ODS</h3><span class="badge" id="hep-cfg-badge">▼</span>
+      </div>
+      <div class="optional-body" id="hep-cfg-body">
+        <div class="form-row">
+          <div class="fg"><label>Email / Korisnik</label><input id="cfg-hep-user" placeholder="vas@email.hr"></div>
+          <div class="fg"><label>Lozinka</label><input type="password" id="cfg-hep-pass" placeholder="(ostavi prazno = ne mijenjaj)"></div>
+          <div class="fg"><label>Šifra mjernog mjesta</label><input id="cfg-hep-sifra" placeholder="0149216862"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SMA -->
+    <div class="optional-section" style="margin-bottom:10px">
+      <div class="optional-header" onclick="toggleOptSec('sma-cfg')">
+        <h3>☀️ SMA Sunny Portal</h3><span class="badge" id="sma-cfg-badge">▼</span>
+      </div>
+      <div class="optional-body" id="sma-cfg-body">
+        <div class="form-row">
+          <div class="fg"><label>Email</label><input id="cfg-sma-user" placeholder="vas@email.hr"></div>
+          <div class="fg"><label>Lozinka</label><input type="password" id="cfg-sma-pass" placeholder="(ostavi prazno = ne mijenjaj)"></div>
+        </div>
+        <div class="form-row">
+          <div class="fg"><label>Plant ID</label><input id="cfg-sma-plant" placeholder="12821140"></div>
+          <div class="fg"><label>Inverter 1 ID</label><input id="cfg-sma-inv1" placeholder="12821155"></div>
+          <div class="fg"><label>Inverter 2 ID</label><input id="cfg-sma-inv2" placeholder="12821156"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- HA -->
+    <div class="optional-section" style="margin-bottom:10px">
+      <div class="optional-header" onclick="toggleOptSec('ha-cfg')">
+        <h3>🏠 Home Assistant</h3><span class="badge" id="ha-cfg-badge">▼</span>
+      </div>
+      <div class="optional-body" id="ha-cfg-body">
+        <div class="form-row">
+          <div class="fg"><label>URL</label><input id="cfg-ha-url" placeholder="https://homeassistant.local:8123"></div>
+          <div class="fg"><label>Token</label><input type="password" id="cfg-ha-token" placeholder="(ostavi prazno = ne mijenjaj)"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- APP -->
+    <div class="optional-section" style="margin-bottom:14px">
+      <div class="optional-header" onclick="toggleOptSec('app-cfg')">
+        <h3>🔒 Aplikacija</h3><span class="badge" id="app-cfg-badge">▼</span>
+      </div>
+      <div class="optional-body" id="app-cfg-body">
+        <div class="form-row">
+          <div class="fg"><label>Lozinka dashboarda</label><input type="password" id="cfg-app-pass" placeholder="(prazno = bez lozinke)"></div>
+        </div>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" onclick="savePostavke()">💾 Spremi konfiguraciju</button>
+    <span id="cfg-status" style="margin-left:12px;font-size:12px;color:var(--muted)"></span>
+  </div>
+
+  <!-- BACKUP -->
+  <div class="form-section" style="margin-bottom:14px">
+    <h3>💾 Backup baze podataka</h3>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:14px">Redoviti backup štiti od gubitka podataka. Baza sadrži sve HEP i SMA podatke, korisnike i konfiguraciju.</p>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <a href="/api/postavke/backup" class="btn btn-primary btn-sm" style="text-decoration:none">⬇ Preuzmi backup (.db)</a>
+      <button class="btn btn-secondary btn-sm" onclick="autoBackup()">💾 Spremi backup na disk</button>
+      <button class="btn btn-secondary btn-sm" onclick="setupAutoBackup()">⏱ Automatski backup (dnevno)</button>
+    </div>
+    <div id="backup-status" style="margin-top:10px;font-size:12px;color:var(--muted);font-family:var(--mono)"></div>
+  </div>
+
+  <!-- IMPORT POVIJEST -->
+  <div class="form-section" style="margin-bottom:14px">
+    <h3>📥 Import podataka</h3>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin-bottom:14px">
+      <div class="fin">
+        <div class="lbl">HEP ODS — zadnjih 30 dana</div>
+        <div style="margin-top:8px">
+          <button class="btn btn-secondary btn-sm" onclick="runImport('hep-30')">▶ Pokreni</button>
+        </div>
+      </div>
+      <div class="fin">
+        <div class="lbl">HEP ODS — puni import (sve)</div>
+        <div style="margin-top:8px">
+          <button class="btn btn-secondary btn-sm" onclick="runImport('hep-sve')">▶ Pokreni</button>
+        </div>
+      </div>
+      <div class="fin">
+        <div class="lbl">SMA History — nastavak</div>
+        <div style="margin-top:8px">
+          <button class="btn btn-secondary btn-sm" onclick="runImport('sma')">▶ Pokreni</button>
+        </div>
+      </div>
+      <div class="fin">
+        <div class="lbl">Home Assistant sync</div>
+        <div style="margin-top:8px">
+          <button class="btn btn-secondary btn-sm" onclick="runImport('ha')">▶ Pokreni</button>
+        </div>
+      </div>
+    </div>
+    <div id="import-output" style="display:none;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:var(--mono);font-size:12px;color:var(--muted);max-height:200px;overflow-y:auto"></div>
+  </div>
+
+  <!-- KORISNICI -->
+  <div class="form-section" style="margin-bottom:14px">
+    <h3>👥 Korisnici</h3>
+    <div class="form-row" style="margin-bottom:10px">
+      <div class="fg"><label>Korisničko ime</label><input id="usr-name" placeholder="korisnik"></div>
+      <div class="fg"><label>Lozinka</label><input type="password" id="usr-pass" placeholder="••••••••"></div>
+      <div class="fg">
+        <label>Uloga</label>
+        <select id="usr-role" style="width:100%;padding:9px 12px;background:var(--bg);border:1px solid var(--border);border-radius:7px;color:var(--text);font-family:var(--mono);font-size:14px">
+          <option value="admin">Admin</option>
+          <option value="viewer">Viewer (samo pregled)</option>
+        </select>
+      </div>
+    </div>
+    <button class="btn btn-primary btn-sm" onclick="addKorisnik()">Dodaj korisnika</button>
+    <div style="margin-top:14px">
+      <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:var(--mono)">
+        <thead><tr>
+          <th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);color:var(--muted);font-size:11px;text-transform:uppercase">Korisnik</th>
+          <th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);color:var(--muted);font-size:11px;text-transform:uppercase">Uloga</th>
+          <th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);color:var(--muted);font-size:11px;text-transform:uppercase">Zadnja prijava</th>
+          <th></th>
+        </tr></thead>
+        <tbody id="tKorisnici"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- INFO -->
+  <div class="card">
+    <div class="card-title">ℹ️ O aplikaciji</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-top:8px" id="app-info"></div>
+  </div>
+
+</div></div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -577,6 +756,7 @@ function goTo(name,el){
   if(name==='racuni'&&!window.RACUNI) loadRacuni();
   if(name==='optimalno'&&!OPT) loadOpt();
   if(name==='povijest'&&!POV) { brziIzbor('30dana'); }
+  if(name==='postavke') loadPostavke();
 }
 
 // ---- HELPERS ----
@@ -1191,29 +1371,210 @@ async function loadUsporedba(){
 // ---- CHART FACTORY ----
 function mkChart(id,type,labels,datasets,unit){
   if(CH[id])CH[id].destroy();
+  const isDark=document.documentElement.getAttribute('data-theme')!=='light';
+  const gridColor=isDark?'rgba(31,45,61,.5)':'rgba(208,218,228,.7)';
+  const tickColor=isDark?'#526070':'#7a8fa6';
   CH[id]=new Chart(document.getElementById(id).getContext('2d'),{
     type,data:{labels,datasets},
     options:{
       responsive:true,maintainAspectRatio:false,
       interaction:{mode:'index',intersect:false},
       plugins:{
-        legend:{labels:{color:'#526070',font:{family:'IBM Plex Sans',size:11},boxWidth:10,padding:12}},
-        tooltip:{backgroundColor:'#0f1623',borderColor:'#1f2d3d',borderWidth:1,titleColor:'#d0dde8',bodyColor:'#526070',padding:10,
+        legend:{labels:{color:tickColor,font:{family:'IBM Plex Sans',size:11},boxWidth:10,padding:12}},
+        tooltip:{
+          backgroundColor:isDark?'#0f1623':'#ffffff',
+          borderColor:isDark?'#1f2d3d':'#d0dae4',
+          borderWidth:1,
+          titleColor:isDark?'#d0dde8':'#1a2535',
+          bodyColor:isDark?'#526070':'#7a8fa6',
+          padding:10,
           callbacks:{label:c=>` ${c.dataset.label}: ${(+c.parsed.y).toFixed(2)} ${unit}`}
         }
       },
       scales:{
-        x:{grid:{color:'rgba(31,45,61,.5)'},ticks:{color:'#526070',font:{family:'IBM Plex Mono',size:11},maxTicksLimit:12}},
-        y:{grid:{color:'rgba(31,45,61,.5)'},ticks:{color:'#526070',font:{family:'IBM Plex Mono',size:11}}},
+        x:{grid:{color:gridColor},ticks:{color:tickColor,font:{family:'IBM Plex Mono',size:11},maxTicksLimit:12}},
+        y:{grid:{color:gridColor},ticks:{color:tickColor,font:{family:'IBM Plex Mono',size:11}}},
       }
     }
   });
 }
 
-// ---- TOAST ----
+// ---- POSTAVKE ----
+function toggleOptSec(id){
+  const b=document.getElementById(id+'-body');
+  const badge=document.getElementById(id+'-badge');
+  b.classList.toggle('open');
+  badge.textContent=b.classList.contains('open')?'▲':'▼';
+}
+
+async function loadPostavke(){
+  try{
+    // Konfiguracija
+    const r=await fetch('/api/postavke');
+    const cfg=await r.json();
+    document.getElementById('cfg-hep-user').value=cfg.HEP_USERNAME||'';
+    document.getElementById('cfg-hep-sifra').value=cfg.HEP_SIFRA||'';
+    document.getElementById('cfg-sma-user').value=cfg.SMA_USERNAME||'';
+    document.getElementById('cfg-sma-plant').value=cfg.SMA_PLANT_ID||'';
+    document.getElementById('cfg-sma-inv1').value=cfg.SMA_INV1_ID||'';
+    document.getElementById('cfg-sma-inv2').value=cfg.SMA_INV2_ID||'';
+    document.getElementById('cfg-ha-url').value=cfg.HA_URL||'';
+    // Postavi placeholdere za lozinke
+    if(cfg.HEP_PASSWORD_SET) document.getElementById('cfg-hep-pass').placeholder='(postavljena — ostavi prazno)';
+    if(cfg.SMA_PASSWORD_SET) document.getElementById('cfg-sma-pass').placeholder='(postavljena — ostavi prazno)';
+    if(cfg.HA_TOKEN_SET) document.getElementById('cfg-ha-token').placeholder='(postavljen — ostavi prazno)';
+    if(cfg.DASHBOARD_PASSWORD_SET) document.getElementById('cfg-app-pass').placeholder='(postavljena — ostavi prazno)';
+
+    // Status sustava
+    const s=await fetch('/api/postavke/status');
+    const stat=await s.json();
+    document.getElementById('status-kpi').innerHTML=`
+      <div class="kpi acc"><div class="kpi-lbl">Verzija</div><div class="kpi-val" style="font-size:16px">${stat.version}</div><div class="kpi-sub">HEP Energy Monitor</div></div>
+      <div class="kpi solar"><div class="kpi-lbl">HEP zadnji sync</div><div class="kpi-val" style="font-size:14px">${stat.hep_last_sync?stat.hep_last_sync.slice(0,16):'—'}</div><div class="kpi-sub">${stat.hep_range?.od||'—'} — ${stat.hep_range?.do||'—'}</div></div>
+      <div class="kpi solar"><div class="kpi-lbl">SMA zadnji sync</div><div class="kpi-val" style="font-size:14px">${stat.sma_last_sync?stat.sma_last_sync.slice(0,16):'—'}</div><div class="kpi-sub">${stat.sma_range?.od?.slice(0,10)||'—'} — ${stat.sma_range?.do?.slice(0,10)||'—'}</div></div>
+      <div class="kpi grn"><div class="kpi-lbl">Baza podataka</div><div class="kpi-val" style="font-size:16px">${stat.db_size_mb} MB</div><div class="kpi-sub">HEP: ${(stat.tables?.ocitanja_15min||0).toLocaleString()} zapisa</div></div>
+      <div class="kpi cons"><div class="kpi-lbl">SMA 15-min</div><div class="kpi-val" style="font-size:16px">${(stat.tables?.sma_15min||0).toLocaleString()}</div><div class="kpi-sub">zapisa</div></div>
+      <div class="kpi feed"><div class="kpi-lbl">SMA live</div><div class="kpi-val" style="font-size:16px">${(stat.tables?.sma_live||0).toLocaleString()}</div><div class="kpi-sub">zapisa</div></div>
+    `;
+
+    document.getElementById('app-info').innerHTML=`
+      <div class="summary-item ok"><div class="label">URL</div><div class="value">energija.infobot.hr</div></div>
+      <div class="summary-item ok"><div class="label">HEP ODS</div><div class="value">${cfg.HEP_USERNAME||'—'}</div></div>
+      <div class="summary-item ${cfg.SMA_USERNAME?'ok':'skip'}"><div class="label">SMA</div><div class="value">${cfg.SMA_USERNAME||'Nije konfigurirano'}</div></div>
+      <div class="summary-item ${cfg.HA_URL?'ok':'skip'}"><div class="label">Home Assistant</div><div class="value">${cfg.HA_URL||'Nije konfigurirano'}</div></div>
+    `;
+
+    // Korisnici
+    loadKorisnici();
+  }catch(e){console.error(e);}
+}
+
+async function savePostavke(){
+  const data={
+    HEP_USERNAME: document.getElementById('cfg-hep-user').value,
+    HEP_SIFRA:    document.getElementById('cfg-hep-sifra').value,
+    SMA_USERNAME: document.getElementById('cfg-sma-user').value,
+    SMA_PLANT_ID: document.getElementById('cfg-sma-plant').value,
+    SMA_INV1_ID:  document.getElementById('cfg-sma-inv1').value,
+    SMA_INV2_ID:  document.getElementById('cfg-sma-inv2').value,
+    HA_URL:       document.getElementById('cfg-ha-url').value,
+  };
+  // Dodaj lozinke samo ako su unesene
+  const hepPass=document.getElementById('cfg-hep-pass').value;
+  const smaPass=document.getElementById('cfg-sma-pass').value;
+  const haToken=document.getElementById('cfg-ha-token').value;
+  const appPass=document.getElementById('cfg-app-pass').value;
+  if(hepPass) data.HEP_PASSWORD=hepPass;
+  if(smaPass) data.SMA_PASSWORD=smaPass;
+  if(haToken) data.HA_TOKEN=haToken;
+  if(appPass) data.DASHBOARD_PASSWORD=appPass;
+
+  try{
+    const r=await fetch('/api/postavke',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+    const d=await r.json();
+    if(d.ok){
+      document.getElementById('cfg-status').textContent='✓ Spremljeno';
+      showToast('Konfiguracija spremljena!');
+      setTimeout(()=>document.getElementById('cfg-status').textContent='',3000);
+    }
+  }catch(e){document.getElementById('cfg-status').textContent='✗ Greška';}
+}
+
+async function runImport(tip){
+  const out=document.getElementById('import-output');
+  out.style.display='block';
+  out.innerHTML='⏳ Pokretanje...<br>';
+
+  const endpoints={
+    'hep-30': '/api/setup/import-hep?dani=30',
+    'hep-sve': '/api/setup/import-hep?dani=1500',
+    'sma': '/api/setup/import-sma',
+    'ha': '/api/setup/sync-ha',
+  };
+
+  try{
+    out.innerHTML+=`▶ ${tip} import...<br>`;
+    const r=await fetch(endpoints[tip],{method:'POST'});
+    const d=await r.json();
+    out.innerHTML+=`✓ ${d.info||'Gotovo'}<br>`;
+    showToast('Import završen!');
+  }catch(e){
+    out.innerHTML+=`✗ Greška: ${e.message}<br>`;
+  }
+  out.scrollTop=out.scrollHeight;
+}
+
+async function loadKorisnici(){
+  try{
+    const r=await fetch('/api/postavke/korisnici');
+    const korisnici=await r.json();
+    const tb=document.getElementById('tKorisnici');
+    tb.innerHTML='';
+    if(!korisnici.length){
+      tb.innerHTML='<tr><td colspan="4" style="padding:12px;color:var(--muted);text-align:center">Nema korisnika — koristi se DASHBOARD_PASSWORD iz .env</td></tr>';
+      return;
+    }
+    korisnici.forEach(k=>{
+      tb.innerHTML+=`<tr>
+        <td style="padding:9px 12px">${k.username}</td>
+        <td style="padding:9px 12px"><span style="background:${k.uloga==='admin'?'rgba(34,211,153,.15)':'rgba(82,96,112,.15)'};color:${k.uloga==='admin'?'var(--green)':'var(--muted)'};padding:2px 8px;border-radius:4px;font-size:11px">${k.uloga}</span></td>
+        <td style="padding:9px 12px;color:var(--muted)">${k.zadnja_prijava?k.zadnja_prijava.slice(0,16):'Nikad'}</td>
+        <td style="padding:9px 12px"><button onclick="deleteKorisnik('${k.username}')" style="background:none;border:none;color:var(--grid-out);cursor:pointer">✕</button></td>
+      </tr>`;
+    });
+  }catch(e){console.error(e);}
+}
+
+async function addKorisnik(){
+  const name=document.getElementById('usr-name').value.trim();
+  const pass=document.getElementById('usr-pass').value;
+  const role=document.getElementById('usr-role').value;
+  if(!name||!pass){showToast('Unesite korisnika i lozinku!');return;}
+  await fetch('/api/postavke/korisnici',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:name,password:pass,uloga:role})});
+  document.getElementById('usr-name').value='';
+  document.getElementById('usr-pass').value='';
+  showToast('Korisnik dodan!');
+  loadKorisnici();
+}
+
+async function deleteKorisnik(name){
+  if(!confirm('Obrisati korisnika '+name+'?'))return;
+  await fetch('/api/postavke/korisnici?username='+name,{method:'DELETE'});
+  loadKorisnici();
+}
+async function autoBackup(){
+  const r=await fetch('/api/postavke/backup/auto',{method:'POST'});
+  const d=await r.json();
+  const el=document.getElementById('backup-status');
+  if(d.ok){el.textContent='✓ Backup: '+d.path;showToast('Backup uspješan!');}
+  else el.textContent='✗ Greška: '+d.error;
+}
+function setupAutoBackup(){showToast('Automatski backup radi svaki dan kroz sync_loop.sh');}
+
 function showToast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3000);}
 
 let syncTimer = null;
+
+function toggleTheme(){
+  const html=document.documentElement;
+  const isLight=html.getAttribute('data-theme')==='light';
+  html.setAttribute('data-theme', isLight?'dark':'light');
+  document.getElementById('themeToggle').textContent=isLight?'🌙':'☀️';
+  localStorage.setItem('theme', isLight?'dark':'light');
+  // Redraw charts
+  Object.values(CH).forEach(c=>c&&c.update());
+}
+
+// Inicijalizacija teme
+(function(){
+  const saved=localStorage.getItem('theme')||'dark';
+  document.documentElement.setAttribute('data-theme',saved);
+  // Postavi toggle emoji kad DOM bude spreman
+  document.addEventListener('DOMContentLoaded',()=>{
+    const btn=document.getElementById('themeToggle');
+    if(btn) btn.textContent=saved==='light'?'☀️':'🌙';
+  });
+})();
 
 function changeSyncInterval() {
   const sek = +document.getElementById('syncInterval').value;

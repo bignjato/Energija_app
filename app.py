@@ -1,63 +1,157 @@
 #!/usr/bin/env python3
 """
 Flask web server za HEP + SMA energy dashboard
+InfoBot — Boris Ignjatović
 """
 
-from flask import Flask, jsonify, render_template_string, request
-import sqlite3
-import os
+from flask import Flask, jsonify, request, session, redirect
+import sqlite3, os, hashlib, secrets
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
-DB_PATH = os.environ.get('DB_PATH', '/data/hep_energy.db')
+DB_PATH    = os.environ.get('DB_PATH', '/data/hep_energy.db')
 TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'dashboard_template.html')
+app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 
-# Stvarne HEP cijene iz računa (s PDV 13%)
-# Od 01.01.2026 (HEPI bijeli, E-K-N-BIJ1)
+# ===== BAZA — INICIJALIZACIJA =====
+
+def init_db():
+    """Inicijaliziraj bazu — kreiraj tablice i defaultne vrijednosti"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+
+    # Config tablica
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS config (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated TEXT DEFAULT (datetime('now'))
+        )
+    ''')
+
+    # Korisnici tablica
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS korisnici (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            uloga TEXT DEFAULT 'viewer',
+            aktivan INTEGER DEFAULT 1,
+            stvoren TEXT DEFAULT (datetime('now')),
+            zadnja_prijava TEXT
+        )
+    ''')
+
+    # Kreiraj defaultnog admin korisnika ako nema nijednog
+    count = conn.execute('SELECT COUNT(*) FROM korisnici').fetchone()[0]
+    if count == 0:
+        salt = secrets.token_hex(16)
+        pw_hash = hashlib.sha256(f'{salt}:admin'.encode()).hexdigest()
+        conn.execute('''
+            INSERT INTO korisnici (username, password_hash, uloga)
+            VALUES (?, ?, 'admin')
+        ''', ('admin', f'{salt}:{pw_hash}'))
+        app.logger.info('Kreiran defaultni admin/admin korisnik')
+
+    # Migriraj .env u config tablicu (samo jednom)
+    migrated = conn.execute(
+        "SELECT value FROM config WHERE key='_migrated'"
+    ).fetchone()
+
+    if not migrated:
+        env_keys = [
+            'HEP_USERNAME', 'HEP_PASSWORD', 'HEP_SIFRA',
+            'SMA_USERNAME', 'SMA_PASSWORD', 'SMA_CLIENT_ID',
+            'SMA_PLANT_ID', 'SMA_INV1_ID', 'SMA_INV2_ID',
+            'HA_URL', 'HA_TOKEN',
+            'TARIFA_VT', 'TARIFA_NT', 'TARIFA_PROD',
+            'TARIFA_PDV', 'TARIFA_VT_OD', 'TARIFA_VT_DO',
+        ]
+        for key in env_keys:
+            val = os.environ.get(key, '')
+            if val:
+                conn.execute(
+                    'INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)',
+                    (key, val)
+                )
+        conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('_migrated', '1')")
+        app.logger.info('Migriran .env u config tablicu')
+
+    # Defaultne tarife ako ne postoje
+    defaults = {
+        'TARIFA_VT': '0.131205', 'TARIFA_NT': '0.064379',
+        'TARIFA_PROD': '0.064379', 'TARIFA_PDV': '13',
+        'TARIFA_VT_OD': '7', 'TARIFA_VT_DO': '21',
+    }
+    for k, v in defaults.items():
+        conn.execute('INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)', (k, v))
+
+    conn.commit()
+    conn.close()
+
+
+def get_config(key, default=''):
+    """Dohvati konfiguraciju iz baze"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute('SELECT value FROM config WHERE key=?', (key,)).fetchone()
+        conn.close()
+        return row[0] if row else os.environ.get(key, default)
+    except:
+        return os.environ.get(key, default)
+
+
+def set_config(key, value):
+    """Spremi konfiguraciju u bazu"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        'INSERT OR REPLACE INTO config (key, value, updated) VALUES (?, ?, datetime("now"))',
+        (key, value)
+    )
+    conn.commit()
+    conn.close()
+
+
+# Pokretanje init pri startu
+with app.app_context():
+    try:
+        init_db()
+    except Exception as e:
+        print(f'Init DB error: {e}')
+
+
+# ===== HEP TARIFA =====
 HEP_TARIFA = {
-    'vt_opskrba':  0.131205,  # €/kWh VT opskrba (bez PDV)
-    'nt_opskrba':  0.064379,  # €/kWh NT opskrba (bez PDV)
-    'vt_distrib':  0.044446,  # €/kWh VT distribucija
-    'nt_distrib':  0.020514,  # €/kWh NT distribucija
-    'vt_prijenos': 0.021256,  # €/kWh VT prijenos
-    'nt_prijenos': 0.008175,  # €/kWh NT prijenos
-    'solidarna':   0.003982,  # €/kWh solidarna naknada
-    'oie':         0.013239,  # €/kWh OIE naknada
-    'opskrbna_mj': 0.982,     # €/mj opskrbna naknada
-    'mjerna_mj':   1.983,     # €/mj naknada za mjernu uslugu
-    'pdv':         0.13,      # PDV 13%
-    'vt_udio':     0.45,      # pretpostavljeni udio VT (45%)
-    'otkup':       0.064379,  # €/kWh otkup viška (NT cijena)
+    'vt_opskrba':  0.131205,
+    'nt_opskrba':  0.064379,
+    'vt_distrib':  0.044446,
+    'nt_distrib':  0.020514,
+    'vt_prijenos': 0.021256,
+    'nt_prijenos': 0.008175,
+    'solidarna':   0.003982,
+    'oie':         0.013239,
+    'opskrbna_mj': 0.982,
+    'mjerna_mj':   1.983,
+    'pdv':         0.13,
+    'vt_udio':     0.45,
+    'otkup':       0.064379,
 }
 
 def izracunaj_racun(kwh_plus, kwh_minus, n_dana=30):
-    """
-    Procjena HEP računa na temelju stvarnih cijena.
-    kwh_plus = potrošnja iz mreže (A+)
-    kwh_minus = predaja u mrežu (A-)
-    """
     t = HEP_TARIFA
     vt = kwh_plus * t['vt_udio']
     nt = kwh_plus * (1 - t['vt_udio'])
     n_mj = n_dana / 30.0
-
-    # Opskrba
     opskrba = (vt * t['vt_opskrba'] + nt * t['nt_opskrba'] +
                kwh_plus * (t['solidarna'] + t['oie']) +
                t['opskrbna_mj'] * n_mj -
-               kwh_minus * t['otkup'])  # odbitak za predaju
-
-    # Mreža (distribucija + prijenos)
+               kwh_minus * t['otkup'])
     mreza = (vt * (t['vt_distrib'] + t['vt_prijenos']) +
              nt * (t['nt_distrib'] + t['nt_prijenos']) +
              t['mjerna_mj'] * n_mj)
-
     osnovica = opskrba + mreza
-    pdv = osnovica * t['pdv']
-    return round(osnovica + pdv, 2)
+    return round(osnovica * (1 + t['pdv']), 2)
 
-
-def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -412,76 +506,143 @@ def api_racuni():
 
 # ===== LOGIN =====
 import hashlib, secrets, functools
-from flask import session
+from flask import session, redirect
 
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 LOGIN_PASSWORD = os.environ.get('DASHBOARD_PASSWORD', '')
 
-def login_required(f):
-    @functools.wraps(f)
-    def decorated(*args, **kwargs):
-        if LOGIN_PASSWORD and not session.get('logged_in'):
-            if request.path.startswith('/api/'):
-                return jsonify({'error': 'Unauthorized'}), 401
-            return '''<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>Login — HEP Monitor</title>
+LOGIN_PAGE = '''<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>InfoBot Energija — Login</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600;700&family=IBM+Plex+Mono&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#080c12;color:#d0dde8;font-family:IBM Plex Sans,sans-serif;
-     display:flex;align-items:center;justify-content:center;min-height:100vh}
-.box{background:#0f1623;border:1px solid #1f2d3d;border-radius:12px;padding:40px;width:360px}
-h1{font-size:20px;color:#fff;margin-bottom:6px}
-p{font-size:13px;color:#526070;margin-bottom:24px}
-input{width:100%;padding:10px 14px;background:#080c12;border:1px solid #1f2d3d;
-      border-radius:8px;color:#d0dde8;font-size:14px;margin-bottom:14px;font-family:monospace}
+body{background:#080c12;color:#d0dde8;font-family:'IBM Plex Sans',sans-serif;
+     display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
+.box{background:#0f1623;border:1px solid #1f2d3d;border-radius:14px;padding:40px 36px;width:100%;max-width:400px;box-shadow:0 20px 60px rgba(0,0,0,0.5)}
+.logo{display:flex;align-items:center;justify-content:center;margin-bottom:28px}
+.logo-text{font-size:32px;font-weight:900;letter-spacing:-1px;line-height:1}
+.logo-info{color:#00d4ff}
+.logo-bot{color:#e63329}
+.subtitle{font-size:11px;color:#526070;text-align:center;margin-top:4px;text-transform:uppercase;letter-spacing:1px}
+h2{font-size:16px;font-weight:600;color:#fff;margin-bottom:6px;text-align:center}
+p{font-size:13px;color:#526070;margin-bottom:24px;text-align:center}
+label{display:block;font-size:11px;color:#526070;text-transform:uppercase;letter-spacing:.6px;margin-bottom:5px}
+input{width:100%;padding:11px 14px;background:#080c12;border:1px solid #1f2d3d;
+      border-radius:8px;color:#d0dde8;font-size:14px;margin-bottom:16px;font-family:'IBM Plex Mono',monospace;transition:border-color .2s}
 input:focus{outline:none;border-color:#22d3ee}
-button{width:100%;padding:11px;background:#22d3ee;color:#000;border:none;
-       border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
-.err{color:#f87171;font-size:13px;margin-bottom:12px;display:none}
+button{width:100%;padding:12px;background:linear-gradient(135deg,#22d3ee,#0891b2);color:#000;border:none;
+       border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;letter-spacing:.3px;transition:opacity .2s}
+button:hover{opacity:.9}
+.err{color:#f87171;font-size:13px;margin-bottom:14px;text-align:center;display:none;
+     background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3);border-radius:6px;padding:8px}
+.divider{border:none;border-top:1px solid #1f2d3d;margin:20px 0}
+.footer{font-size:11px;color:#526070;text-align:center}
 </style></head>
 <body><div class="box">
-<h1>⚡ HEP Energy Monitor</h1>
-<p>Unesite lozinku za pristup</p>
-<div class="err" id="err">Pogrešna lozinka</div>
-<form method="POST" action="/login">
-<input type="password" name="password" placeholder="Lozinka" autofocus>
-<button type="submit">Prijava</button>
-</form>
+  <div class="logo">
+    <div>
+      <div class="logo-text"><span class="logo-info">INFO</span><span class="logo-bot">BOT</span></div>
+      <div class="subtitle">Obrt za informatičke i druge usluge</div>
+    </div>
+  </div>
+  <hr class="divider">
+  <h2>Energetski Monitor</h2>
+  <p>Boris Ignjatović · Lukavec</p>
+  <div class="err" id="err">Pogrešno korisničko ime ili lozinka</div>
+  <form method="POST" action="/login">
+    <label>Korisničko ime</label>
+    <input type="text" name="username" placeholder="korisnik" autocomplete="username" autofocus>
+    <label>Lozinka</label>
+    <input type="password" name="password" placeholder="••••••••" autocomplete="current-password">
+    <button type="submit">→ Prijava</button>
+  </form>
+  <hr class="divider">
+  <div class="footer">© 2024 InfoBot · energija.infobot.hr</div>
 </div>
-<script>
-if(window.location.search.includes('err'))
-  document.getElementById('err').style.display='block'
-</script>
+<script>if(window.location.search.includes('err'))document.getElementById('err').style.display='block'</script>
 </body></html>'''
-        return f(*args, **kwargs)
-    return decorated
 
 
-@app.route('/login', methods=['POST'])
-def do_login():
-    pw = request.form.get('password', '')
-    if not LOGIN_PASSWORD or pw == LOGIN_PASSWORD:
-        session['logged_in'] = True
-        return redirect('/')
-    return redirect('/login?err=1')
+@app.before_request
+def check_login():
+    """Provjeri login prije svake rute — uvijek traži prijavu"""
+    free = ['/login', '/logout', '/health', '/favicon.ico']
+    if request.path in free or request.path.startswith('/static/'):
+        return None
+    if session.get('logged_in'):
+        return None
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'Unauthorized'}), 401
+    return LOGIN_PAGE
 
 
-@app.route('/login')
+@app.route('/login', methods=['GET', 'POST'])
 def login_page():
-    return redirect('/?login=1')
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        pw = request.form.get('password', '')
+
+        # Provjeri DASHBOARD_PASSWORD (samo lozinka, bez usernamea)
+        if LOGIN_PASSWORD and pw == LOGIN_PASSWORD:
+            session['logged_in'] = True
+            session['username'] = username or 'admin'
+            session['uloga'] = 'admin'
+            session.permanent = True
+            return redirect('/')
+
+        # Provjeri korisničku bazu po usernameu
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            user = conn.execute(
+                'SELECT username, password_hash, uloga FROM korisnici WHERE username=? AND aktivan=1',
+                (username,)
+            ).fetchone()
+            conn.close()
+
+            if user:
+                stored = user['password_hash']
+                valid = False
+                if ':' in stored:
+                    # Format: salt:sha256hash
+                    salt, pw_hash = stored.split(':', 1)
+                    test = hashlib.sha256(f'{salt}:{pw}'.encode()).hexdigest()
+                    valid = (test == pw_hash)
+                else:
+                    # Stari format — SHA256 direktno
+                    valid = (hashlib.sha256(pw.encode()).hexdigest() == stored)
+
+                if valid:
+                    session['logged_in'] = True
+                    session['username'] = user['username']
+                    session['uloga'] = user['uloga']
+                    session.permanent = True
+                    conn2 = sqlite3.connect(DB_PATH)
+                    conn2.execute(
+                        'UPDATE korisnici SET zadnja_prijava=datetime("now") WHERE username=?',
+                        (user['username'],)
+                    )
+                    conn2.commit()
+                    conn2.close()
+                    return redirect('/')
+        except Exception as e:
+            app.logger.error(f'Login error: {e}')
+
+        return LOGIN_PAGE.replace('display:none', 'display:block')
+    return LOGIN_PAGE
 
 
 @app.route('/logout')
 def logout():
     session.clear()
-    return redirect('/')
+    return redirect('/login')
 
 
-from flask import redirect
-
-# Wrap glavnih ruta s login_required
-_orig_index = app.view_functions['index']
-app.view_functions['index'] = login_required(_orig_index)
+# Wrap index s login info (za logout gumb)
+_orig_index = app.view_functions.get('index')
+if _orig_index:
+    app.view_functions['index'] = _orig_index
 
 
 @app.route('/api/data/sve')
@@ -615,6 +776,290 @@ def api_povijest():
             })
     finally:
         conn.close()
+
+
+
+# ===== POSTAVKE API =====
+
+@app.route('/api/postavke', methods=['GET', 'POST'])
+def api_postavke():
+    """Čitanje i pisanje konfiguracije iz .env datoteke"""
+    env_path = os.path.join(os.path.dirname(__file__), '.env')
+
+    # Sigurni ključevi koje smijemo čitati/pisati (bez lozinki u GET)
+    safe_keys = ['HEP_USERNAME', 'HEP_SIFRA', 'SMA_USERNAME', 'SMA_PLANT_ID',
+                 'SMA_INV1_ID', 'SMA_INV2_ID', 'HA_URL', 'TARIFA_VT', 'TARIFA_NT',
+                 'TARIFA_PROD', 'TARIFA_PDV', 'TARIFA_VT_OD', 'TARIFA_VT_DO']
+    all_keys = safe_keys + ['HEP_PASSWORD', 'SMA_PASSWORD', 'HA_TOKEN',
+                            'DASHBOARD_PASSWORD', 'SMA_CLIENT_ID', 'DB_PATH', 'SECRET_KEY']
+
+    if request.method == 'GET':
+        cfg = {}
+        for key in safe_keys:
+            cfg[key] = os.environ.get(key, '')
+        # Označi je li lozinka postavljena
+        cfg['HEP_PASSWORD_SET']      = bool(os.environ.get('HEP_PASSWORD'))
+        cfg['SMA_PASSWORD_SET']      = bool(os.environ.get('SMA_PASSWORD'))
+        cfg['HA_TOKEN_SET']          = bool(os.environ.get('HA_TOKEN'))
+        cfg['DASHBOARD_PASSWORD_SET']= bool(os.environ.get('DASHBOARD_PASSWORD'))
+        return jsonify(cfg)
+
+    elif request.method == 'POST':
+        data = request.get_json()
+
+        # Čitaj postojeći .env
+        existing = {}
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        k, v = line.split('=', 1)
+                        existing[k.strip()] = v.strip()
+
+        # Ažuriraj samo dostavljene ključeve
+        for key in all_keys:
+            if key in data and data[key] != '':
+                existing[key] = data[key]
+            elif key in data and data[key] == '' and key.endswith('_PASSWORD'):
+                pass  # Ne briši lozinku ako je prazna
+
+        # Zapiši .env
+        lines = ['# HEP Energy Monitor konfiguracija\n']
+        sections = {
+            'HEP': ['HEP_USERNAME', 'HEP_PASSWORD', 'HEP_SIFRA'],
+            'SMA': ['SMA_USERNAME', 'SMA_PASSWORD', 'SMA_CLIENT_ID',
+                    'SMA_PLANT_ID', 'SMA_INV1_ID', 'SMA_INV2_ID'],
+            'HA':  ['HA_URL', 'HA_TOKEN'],
+            'APP': ['DASHBOARD_PASSWORD', 'DB_PATH', 'SECRET_KEY'],
+            'TARIFA': ['TARIFA_VT', 'TARIFA_NT', 'TARIFA_PROD',
+                       'TARIFA_PDV', 'TARIFA_VT_OD', 'TARIFA_VT_DO'],
+        }
+        for section, keys in sections.items():
+            lines.append(f'\n# {section}\n')
+            for k in keys:
+                v = existing.get(k, '')
+                lines.append(f'{k}={v}\n')
+
+        with open(env_path, 'w') as f:
+            f.writelines(lines)
+
+        # Reload env varijabli u trenutni proces
+        for k, v in existing.items():
+            os.environ[k] = v
+
+        return jsonify({'ok': True})
+
+
+@app.route('/api/postavke/status')
+def api_postavke_status():
+    """Status sustava — zadnji sync, broj zapisa, verzija"""
+    conn = get_db()
+    try:
+        # Broj zapisa po tablici
+        tables = {}
+        for tbl in ['ocitanja_15min', 'ocitanja_satna', 'ocitanja_dnevna',
+                    'sma_15min', 'sma_live', 'sma_dnevna', 'racuni']:
+            try:
+                n = conn.execute(f'SELECT COUNT(*) FROM {tbl}').fetchone()[0]
+                tables[tbl] = n
+            except:
+                tables[tbl] = None
+
+        # Zadnji HEP zapis
+        hep_last = conn.execute(
+            'SELECT MAX(ts) FROM ocitanja_satna'
+        ).fetchone()[0]
+
+        # Zadnji SMA live
+        sma_last = None
+        try:
+            sma_last = conn.execute(
+                'SELECT MAX(ts) FROM sma_live'
+            ).fetchone()[0]
+        except: pass
+
+        # Raspon HEP podataka
+        hep_range = conn.execute(
+            'SELECT MIN(datum), MAX(datum) FROM ocitanja_dnevna'
+        ).fetchone()
+
+        # Raspon SMA podataka
+        sma_range = (None, None)
+        try:
+            sma_range = conn.execute(
+                'SELECT MIN(ts), MAX(ts) FROM sma_15min'
+            ).fetchone()
+        except: pass
+
+        # Veličina baze
+        db_size = 0
+        try:
+            db_size = os.path.getsize(os.environ.get('DB_PATH', '/data/hep_energy.db'))
+        except: pass
+
+        return jsonify({
+            'version': '1.0.0',
+            'tables': tables,
+            'hep_last_sync': hep_last,
+            'sma_last_sync': sma_last,
+            'hep_range': {'od': hep_range[0], 'do': hep_range[1]},
+            'sma_range': {'od': sma_range[0], 'do': sma_range[1]},
+            'db_size_mb': round(db_size / 1024 / 1024, 2),
+            'ts': datetime.now().isoformat(),
+        })
+    finally:
+        conn.close()
+
+
+@app.route('/api/postavke/korisnici', methods=['GET', 'POST', 'DELETE'])
+def api_korisnici():
+    """Upravljanje korisnicima u SQLite bazi s hashiranom lozinkom (salt:sha256)"""
+    conn = get_db()
+    try:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS korisnici (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                uloga TEXT DEFAULT 'viewer',
+                aktivan INTEGER DEFAULT 1,
+                stvoren TEXT DEFAULT (datetime('now')),
+                zadnja_prijava TEXT
+            )
+        ''')
+        conn.commit()
+
+        if request.method == 'GET':
+            rows = conn.execute(
+                'SELECT id, username, uloga, aktivan, stvoren, zadnja_prijava FROM korisnici'
+            ).fetchall()
+            # Nikad ne vraćamo password_hash!
+            return jsonify([dict(r) for r in rows])
+
+        elif request.method == 'POST':
+            d = request.get_json()
+            username = d.get('username', '').strip()
+            password = d.get('password', '')
+            uloga    = d.get('uloga', 'viewer')
+
+            if not username or not password:
+                return jsonify({'ok': False, 'error': 'Korisnik i lozinka su obavezni'})
+
+            # Salt + SHA256
+            salt    = secrets.token_hex(16)
+            pw_hash = hashlib.sha256(f'{salt}:{password}'.encode()).hexdigest()
+            stored  = f'{salt}:{pw_hash}'
+
+            conn.execute('''
+                INSERT OR REPLACE INTO korisnici (username, password_hash, uloga)
+                VALUES (?, ?, ?)
+            ''', (username, stored, uloga))
+            conn.commit()
+            return jsonify({'ok': True})
+
+        elif request.method == 'DELETE':
+            username = request.args.get('username', '')
+            # Ne dozvoli brisanje zadnjeg admina
+            admins = conn.execute(
+                "SELECT COUNT(*) FROM korisnici WHERE uloga='admin' AND aktivan=1"
+            ).fetchone()[0]
+            uloga_k = conn.execute(
+                "SELECT uloga FROM korisnici WHERE username=?", (username,)
+            ).fetchone()
+            if uloga_k and uloga_k[0] == 'admin' and admins <= 1:
+                return jsonify({'ok': False, 'error': 'Ne možete obrisati zadnjeg admina!'})
+            conn.execute('DELETE FROM korisnici WHERE username=?', (username,))
+            conn.commit()
+            return jsonify({'ok': True})
+    finally:
+        conn.close()
+
+
+@app.route('/api/postavke/backup')
+def api_backup():
+    """Download backup baze"""
+    import shutil
+    from flask import send_file
+    import tempfile
+    try:
+        tmp = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
+        shutil.copy2(DB_PATH, tmp.name)
+        tmp.close()
+        datum = datetime.now().strftime('%Y%m%d_%H%M')
+        return send_file(tmp.name, as_attachment=True,
+                        download_name=f'hep_energy_backup_{datum}.db',
+                        mimetype='application/octet-stream')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/postavke/backup/auto', methods=['POST'])
+def api_backup_auto():
+    """Automatski backup baze na disk"""
+    import shutil
+    backup_dir = os.path.join(os.path.dirname(DB_PATH), 'backups')
+    os.makedirs(backup_dir, exist_ok=True)
+    datum = datetime.now().strftime('%Y%m%d_%H%M')
+    backup_path = os.path.join(backup_dir, f'hep_energy_{datum}.db')
+    try:
+        shutil.copy2(DB_PATH, backup_path)
+        # Zadrži samo zadnjih 7 backupa
+        backups = sorted([f for f in os.listdir(backup_dir) if f.endswith('.db')])
+        for old in backups[:-7]:
+            os.remove(os.path.join(backup_dir, old))
+        return jsonify({'ok': True, 'path': backup_path, 'n_backups': len(backups)})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
+
+
+
+def api_import_hep():
+    """Pokreni HEP import"""
+    import subprocess
+    dani = request.args.get('dani', '30')
+    try:
+        result = subprocess.run(
+            ['python3', '/app/hep_scraper.py', '--dani', str(dani)],
+            capture_output=True, text=True, timeout=300
+        )
+        lines = (result.stdout + result.stderr).strip().split('\n')
+        info = lines[-1] if lines else 'Gotovo'
+        return jsonify({'ok': True, 'info': info})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
+
+
+@app.route('/api/setup/import-sma', methods=['POST'])
+def api_import_sma():
+    """Pokreni SMA history import"""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ['python3', '/app/sma_history_import.py'],
+            capture_output=True, text=True, timeout=600
+        )
+        lines = (result.stdout + result.stderr).strip().split('\n')
+        info = lines[-1] if lines else 'Gotovo'
+        return jsonify({'ok': True, 'info': info})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
+
+
+@app.route('/api/setup/sync-ha', methods=['POST'])
+def api_sync_ha():
+    """Pokreni HA sync"""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ['python3', '/app/ha_sender.py'],
+            capture_output=True, text=True, timeout=60
+        )
+        lines = (result.stdout + result.stderr).strip().split('\n')
+        info = lines[-1] if lines else 'Gotovo'
+        return jsonify({'ok': True, 'info': info})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
 
 
 if __name__ == '__main__':
