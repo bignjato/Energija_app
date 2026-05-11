@@ -9,3 +9,4 @@ hep_energy.db
 # Backups created during deploys
 *.bak.*
 .env.bak.*
+env
