@@ -1,10 +1,18 @@
-"""/api/racuni — CRUD HEP računa."""
+"""/api/racuni — CRUD HEP računa + PDF upload."""
+
+import logging
 
 from flask import Blueprint, jsonify, request, session
 
+from ..bill_parser import extract_text, parse_hep_bill
+from ..core import admin_required
 from ..db import get_db
 
+log = logging.getLogger(__name__)
+
 bp = Blueprint('racuni', __name__, url_prefix='/api')
+
+MAX_PDF_BYTES = 5 * 1024 * 1024  # 5 MB
 
 
 @bp.route('/racuni', methods=['GET', 'POST', 'DELETE'])
@@ -39,3 +47,35 @@ def api_racuni():
         return jsonify({'ok': True})
     finally:
         conn.close()
+
+
+@bp.route('/racuni/upload-pdf', methods=['POST'])
+@admin_required
+def api_upload_pdf():
+    """Parsiraj HEP PDF račun, vrati prepoznata polja za korisničku potvrdu.
+    NE sprema u bazu — frontend pokaže preview pa pozove /api/racuni POST.
+    """
+    if 'file' not in request.files:
+        return jsonify({'ok': False, 'error': 'Pošalji PDF kao multipart field "file"'}), 400
+    f = request.files['file']
+    if not f.filename:
+        return jsonify({'ok': False, 'error': 'Prazno ime datoteke'}), 400
+    if not f.filename.lower().endswith('.pdf'):
+        return jsonify({'ok': False, 'error': 'Samo PDF datoteke su podržane'}), 400
+
+    pdf_bytes = f.read(MAX_PDF_BYTES + 1)
+    if len(pdf_bytes) > MAX_PDF_BYTES:
+        return jsonify({'ok': False, 'error': f'PDF prevelik (>{MAX_PDF_BYTES // 1024 // 1024} MB)'}), 413
+
+    try:
+        text = extract_text(pdf_bytes)
+    except RuntimeError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    except Exception as e:
+        log.exception('PDF extract failed')
+        return jsonify({'ok': False, 'error': f'Ne mogu pročitati PDF: {e}'}), 400
+
+    parsed = parse_hep_bill(text)
+    parsed['ok'] = True
+    parsed['filename'] = f.filename
+    return jsonify(parsed)

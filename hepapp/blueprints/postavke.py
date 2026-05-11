@@ -8,9 +8,12 @@ from datetime import datetime
 from flask import Blueprint, jsonify, request, send_file
 
 from ..core import admin_required, hash_password
-from ..db import DB_PATH, get_db
+from ..db import DB_PATH, get_db, get_config, set_config
 
 bp = Blueprint('postavke', __name__, url_prefix='/api/postavke')
+
+# Ključevi pohranjeni isključivo u config tablici (ne u .env)
+DB_ONLY_KEYS = ['VT_UDIO_PERC']
 
 
 @bp.route('', methods=['GET', 'POST'])
@@ -30,9 +33,17 @@ def api_postavke():
         cfg['SMA_PASSWORD_SET']       = bool(os.environ.get('SMA_PASSWORD'))
         cfg['HA_TOKEN_SET']           = bool(os.environ.get('HA_TOKEN'))
         cfg['DASHBOARD_PASSWORD_SET'] = bool(os.environ.get('DASHBOARD_PASSWORD'))
+        # DB-only ključevi
+        cfg['VT_UDIO_PERC'] = get_config('VT_UDIO_PERC', '45')
         return jsonify(cfg)
 
     data = request.get_json() or {}
+
+    # DB-only ključevi — direktno u config tablicu
+    for k in DB_ONLY_KEYS:
+        if k in data and data[k] != '':
+            set_config(k, str(data[k]))
+
     existing = {}
     if os.path.exists(env_path):
         with open(env_path) as f:
@@ -42,7 +53,7 @@ def api_postavke():
                     k, v = line.split('=', 1)
                     existing[k.strip()] = v.strip()
 
-    # SECRET_KEY nikad ne mijenjamo preko UI-a (rotacija invalidira sve sesije)
+    # SECRET_KEY se NIKAD ne mijenja preko UI-a (rotacija invalidira sve sesije)
     for key in all_keys:
         if key in data and data[key] != '':
             existing[key] = data[key]
@@ -74,7 +85,7 @@ def api_postavke():
 
     return jsonify({
         'ok': True,
-        'warning': 'Promjene vrijede tek nakon restarta sync kontejnera.',
+        'warning': 'Promjene credentialsa vrijede tek nakon restarta sync kontejnera.',
     })
 
 
@@ -83,7 +94,6 @@ def api_postavke_status():
     conn = get_db()
     try:
         tables = {}
-        # Whitelist — hardkodirano, f-string siguran
         for tbl in ['ocitanja_15min', 'ocitanja_satna', 'ocitanja_dnevna',
                     'sma_15min', 'sma_live', 'sma_dnevna', 'racuni']:
             try:
@@ -118,7 +128,7 @@ def api_postavke_status():
             pass
 
         return jsonify({
-            'version':       '1.2.0',
+            'version':       '1.3.0',
             'tables':        tables,
             'hep_last_sync': hep_last,
             'sma_last_sync': sma_last,

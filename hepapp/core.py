@@ -96,10 +96,14 @@ def csrf_check():
 
 # ===== BEFORE-REQUEST =====
 
-FREE_PATHS = ['/login', '/logout', '/health', '/favicon.ico']
+FREE_PATHS    = ['/login', '/logout', '/health', '/favicon.ico']
+WIZARD_PATHS  = ['/setup', '/api/setup/complete', '/logout']
 
 
 def register_before_request(app):
+    from flask import redirect
+    from .db import get_config
+
     @app.before_request
     def _check():
         from .auth import LOGIN_PAGE
@@ -109,4 +113,13 @@ def register_before_request(app):
             if request.path.startswith('/api/'):
                 return jsonify({'error': 'Unauthorized'}), 401
             return LOGIN_PAGE
+
+        # First-run wizard: admin && !setup_complete → /setup
+        if session.get('uloga') == 'admin':
+            if get_config('_setup_complete', '0') != '1':
+                if request.path not in WIZARD_PATHS and not request.path.startswith('/static/'):
+                    if request.path.startswith('/api/'):
+                        return jsonify({'error': 'Setup wizard nije završen — idi na /setup'}), 409
+                    return redirect('/setup')
+
         return csrf_check()

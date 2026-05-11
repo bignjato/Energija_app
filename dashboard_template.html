@@ -408,6 +408,19 @@ tr:hover td { background: var(--surface2); }
   <!-- Unos novog računa -->
   <div class="form-section" style="margin-bottom:14px">
     <h3>➕ Dodaj stvarni HEP račun</h3>
+
+    <!-- PDF upload -->
+    <div style="background:rgba(34,211,238,.06);border:1px dashed rgba(34,211,238,.4);border-radius:8px;padding:14px;margin-bottom:14px">
+      <div style="font-size:13px;color:var(--text);margin-bottom:8px">
+        📎 <strong>Učitaj HEP PDF račun</strong> — polja niže će se automatski popuniti
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <input type="file" id="r-pdf" accept="application/pdf" style="font-size:12px">
+        <button class="btn btn-secondary btn-sm" onclick="uploadPdf()">⬆ Parsiraj PDF</button>
+        <span id="r-pdf-status" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+    </div>
+
     <div class="form-row" style="grid-template-columns:repeat(auto-fill,minmax(140px,1fr))">
       <div class="fg"><label>Razdoblje (MM/GGGG)</label><input id="r-period" placeholder="02/2026"></div>
       <div class="fg"><label>Iznos računa (€)</label><input id="r-iznos" type="number" step="0.01" placeholder="254.72"></div>
@@ -653,6 +666,29 @@ tr:hover td { background: var(--surface2); }
       <div class="optional-body" id="app-cfg-body">
         <div class="form-row">
           <div class="fg"><label>Lozinka dashboarda</label><input type="password" id="cfg-app-pass" placeholder="(prazno = bez lozinke)"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TARIFA / VT udio -->
+    <div class="optional-section" style="margin-bottom:14px">
+      <div class="optional-header" onclick="toggleOptSec('tar-cfg')">
+        <h3>⚡ Tarifa — VT/NT omjer</h3><span class="badge" id="tar-cfg-badge">▼</span>
+      </div>
+      <div class="optional-body" id="tar-cfg-body">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+          Udio potrošnje u <strong>VT (skupljoj)</strong> tarifi. Tipično: ljeto 35%, prosjek 45%, zima 55%.
+        </div>
+        <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+          <input type="range" id="cfg-vt-udio" min="0" max="100" step="1" value="45"
+                 style="flex:1;min-width:200px"
+                 oninput="document.getElementById('cfg-vt-udio-val').textContent=this.value+'%'">
+          <div id="cfg-vt-udio-val" style="font-family:var(--mono);font-size:18px;color:#22d3ee;min-width:60px;text-align:right">45%</div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-secondary btn-sm" onclick="setVtUdio(35)">Ljeto 35%</button>
+          <button class="btn btn-secondary btn-sm" onclick="setVtUdio(45)">Prosjek 45%</button>
+          <button class="btn btn-secondary btn-sm" onclick="setVtUdio(55)">Zima 55%</button>
         </div>
       </div>
     </div>
@@ -1036,6 +1072,44 @@ async function addRacun(){
   showToast('Račun spremljen!');
   window.RACUNI = null;
   loadRacuni();
+}
+
+async function uploadPdf(){
+  const fileEl = document.getElementById('r-pdf');
+  const status = document.getElementById('r-pdf-status');
+  if (!fileEl.files.length) { status.textContent='Odaberi PDF prvo'; return; }
+  status.textContent='Učitavam i parsiram...';
+  const fd = new FormData();
+  fd.append('file', fileEl.files[0]);
+  try {
+    const r = await fetch('/api/racuni/upload-pdf', {method:'POST', body: fd, credentials:'same-origin'});
+    const d = await r.json();
+    if (!d.ok) { status.textContent='Greška: ' + (d.error||'parser fail'); return; }
+    // Pre-fill form fields s onim što je parser našao
+    const setIf = (id, v) => { if (v !== null && v !== undefined) document.getElementById(id).value = v; };
+    setIf('r-period',   d.period);
+    setIf('r-iznos',    d.iznos);
+    setIf('r-vt',       d.kwh_vt);
+    setIf('r-nt',       d.kwh_nt);
+    setIf('r-predaja',  d.kwh_minus);
+    setIf('r-opskrba',  d.opskrba);
+    setIf('r-mreza',    d.mreza);
+    setIf('r-pdv-iznos',d.pdv);
+    // Saznaj koliko polja je popunjeno
+    const filled = ['period','iznos','kwh_vt','kwh_nt','kwh_minus','opskrba','mreza','pdv']
+      .filter(k => d[k] !== null && d[k] !== undefined).length;
+    status.textContent = `✓ Prepoznato ${filled}/8 polja iz "${d.filename}". Provjeri i klikni "Spremi račun".`;
+  } catch(e) {
+    status.textContent = 'Network error: ' + e;
+  }
+}
+
+function setVtUdio(v){
+  const el = document.getElementById('cfg-vt-udio');
+  if (el) {
+    el.value = v;
+    document.getElementById('cfg-vt-udio-val').textContent = v + '%';
+  }
 }
 
 async function deleteRacun(period){
@@ -1426,6 +1500,11 @@ async function loadPostavke(){
     if(cfg.HA_TOKEN_SET) document.getElementById('cfg-ha-token').placeholder='(postavljen — ostavi prazno)';
     if(cfg.DASHBOARD_PASSWORD_SET) document.getElementById('cfg-app-pass').placeholder='(postavljena — ostavi prazno)';
 
+    // VT/NT slider
+    const vtUdio = parseInt(cfg.VT_UDIO_PERC || '45', 10);
+    const sliderEl = document.getElementById('cfg-vt-udio');
+    if (sliderEl) { sliderEl.value = vtUdio; document.getElementById('cfg-vt-udio-val').textContent = vtUdio + '%'; }
+
     // Status sustava
     const s=await fetch('/api/postavke/status');
     const stat=await s.json();
@@ -1469,6 +1548,10 @@ async function savePostavke(){
   if(smaPass) data.SMA_PASSWORD=smaPass;
   if(haToken) data.HA_TOKEN=haToken;
   if(appPass) data.DASHBOARD_PASSWORD=appPass;
+
+  // VT/NT omjer (uvijek šaljemo)
+  const vtSlider = document.getElementById('cfg-vt-udio');
+  if (vtSlider) data.VT_UDIO_PERC = vtSlider.value;
 
   try{
     const r=await fetch('/api/postavke',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});

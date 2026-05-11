@@ -1,4 +1,10 @@
-"""HEP tarifa konstante + procjena računa."""
+"""HEP tarifa konstante + procjena računa.
+
+VT_UDIO se može override-ati preko config tablice (key: VT_UDIO_PERC, vrijednost 0–100).
+Sezonski tipično: ljeto ~35, prosjek ~45, zima ~55.
+"""
+
+from .db import get_config
 
 HEP_TARIFA = {
     'vt_opskrba':  0.131205,
@@ -12,15 +18,28 @@ HEP_TARIFA = {
     'opskrbna_mj': 0.982,
     'mjerna_mj':   1.983,
     'pdv':         0.13,
-    'vt_udio':     0.45,
+    'vt_udio':     0.45,  # default — može se promijeniti u Postavkama (VT_UDIO_PERC)
     'otkup':       0.064379,
 }
 
 
-def izracunaj_racun(kwh_plus, kwh_minus, n_dana=30):
+def get_vt_udio() -> float:
+    """Dohvati trenutni VT udio (0–1). Default 0.45."""
+    try:
+        v = float(get_config('VT_UDIO_PERC', '45'))
+        if 0 <= v <= 100:
+            return v / 100.0
+    except Exception:
+        pass
+    return 0.45
+
+
+def izracunaj_racun(kwh_plus, kwh_minus, n_dana=30, vt_udio=None):
     t = HEP_TARIFA
-    vt = kwh_plus * t['vt_udio']
-    nt = kwh_plus * (1 - t['vt_udio'])
+    if vt_udio is None:
+        vt_udio = get_vt_udio()
+    vt = kwh_plus * vt_udio
+    nt = kwh_plus * (1 - vt_udio)
     n_mj = n_dana / 30.0
     opskrba = (vt * t['vt_opskrba'] + nt * t['nt_opskrba'] +
                kwh_plus * (t['solidarna'] + t['oie']) +

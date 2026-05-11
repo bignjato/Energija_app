@@ -51,6 +51,7 @@ def create_app() -> Flask:
     from .blueprints.racuni   import bp as racuni_bp
     from .blueprints.postavke import bp as postavke_bp
     from .blueprints.setup    import bp as setup_bp
+    from .blueprints.wizard   import bp as wizard_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(views_bp)
@@ -60,5 +61,6 @@ def create_app() -> Flask:
     app.register_blueprint(racuni_bp)
     app.register_blueprint(postavke_bp)
     app.register_blueprint(setup_bp)
+    app.register_blueprint(wizard_bp)
 
     return app

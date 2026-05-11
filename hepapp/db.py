@@ -95,9 +95,21 @@ def init_db():
         'TARIFA_VT': '0.131205', 'TARIFA_NT': '0.064379',
         'TARIFA_PROD': '0.064379', 'TARIFA_PDV': '13',
         'TARIFA_VT_OD': '7', 'TARIFA_VT_DO': '21',
+        'VT_UDIO_PERC': '45',
     }
     for k, v in defaults.items():
         conn.execute('INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)', (k, v))
+
+    # Postojeće instalacije: ako imaju korisnike + HEP credentials → setup već gotov.
+    setup_done = conn.execute("SELECT value FROM config WHERE key='_setup_complete'").fetchone()
+    if not setup_done:
+        has_users = conn.execute('SELECT COUNT(*) FROM korisnici').fetchone()[0] > 0
+        has_hep   = bool(os.environ.get('HEP_USERNAME')) or bool(
+            conn.execute("SELECT value FROM config WHERE key='HEP_USERNAME'").fetchone()
+        )
+        if has_users and has_hep:
+            conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('_setup_complete', '1')")
+            log.info('Postojeća instalacija — setup wizard preskačem.')
 
     conn.commit()
     conn.close()
