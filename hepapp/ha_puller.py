@@ -202,7 +202,7 @@ def pull_recent():
                               total_consumption_w, autarky_rate, battery_soc)
         VALUES (?,?,?,?,?,?,?)
     ''', (
-        datetime.now().isoformat(timespec='seconds'),
+        datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+00:00'),
         pv, feed, grid, cons, aut, soc,
     ))
     conn.commit()

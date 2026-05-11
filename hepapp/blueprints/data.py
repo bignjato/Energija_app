@@ -60,10 +60,12 @@ def api_data():
 
         sma_live, sma_dnevna, sma_satna = None, [], []
         if has_sma:
+            # ORDER BY id (monotonično rastući) umjesto ts — različiti pisači
+            # koriste različite TZ formate pa ts može imati lex-ordering issue.
             row = conn.execute('''
                 SELECT ts, pv_generation_w, feed_in_w, external_consumption_w,
                        total_consumption_w, direct_consumption_w, autarky_rate, self_consumption_rate
-                FROM sma_live ORDER BY ts DESC LIMIT 1
+                FROM sma_live ORDER BY id DESC LIMIT 1
             ''').fetchone()
             if row:
                 sma_live = dict(row)
@@ -269,7 +271,7 @@ def api_povijest():
 def api_sma_live():
     conn = get_db()
     try:
-        row = conn.execute('SELECT * FROM sma_live ORDER BY ts DESC LIMIT 1').fetchone()
+        row = conn.execute('SELECT * FROM sma_live ORDER BY id DESC LIMIT 1').fetchone()
         if row:
             return jsonify(dict(row))
         return jsonify({'error': 'Nema podataka'})
