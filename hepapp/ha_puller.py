@@ -1,25 +1,25 @@
-"""Home Assistant REST API pull — alternativa SMA Monitoring API-ju.
+"""Home Assistant REST API pull — alternativni izvor SMA podataka.
 
-Home Assistant već lokalno (preko Modbus-a) razgovara sa SMA Sunny Home
-Managerom / inverterom i ima senzore s točnim live brojkama. Mi te senzore
-možemo *čitati* (REST API GET /api/states/<entity_id>) i puniti našu
-sma_live tablicu — bez SMA Monitoring API registracije, bez čekanja.
+HA već lokalno (preko Modbus-a) razgovara sa SMA-om i ima sve live brojke
+kao senzore. Mi te senzore čitamo i punimo sma_live + sma_dnevna.
 
-Konfiguracija (env vars):
-    HA_URL                       — npr. https://doma.example.com:8123
+Konfiguracija (env vars — entity_id-evi mogu biti zarezom razdvojene liste
+koje se sumiraju, npr. dva invertera):
+
+    HA_URL                       — npr. https://doma.example.com
     HA_TOKEN                     — long-lived access token
-    HA_ENT_PV_W                  — entity_id za solar power (W), npr. sensor.sma_pv_power
-    HA_ENT_FEED_W                — entity_id za feed-in power (W)
-    HA_ENT_CONS_W                — entity_id za total consumption power (W)
-    HA_ENT_GRID_W                — entity_id za grid consumption power (W)
-    HA_ENT_AUTARKY               — entity_id za autarky rate (0–100 ili 0–1)
-    HA_ENT_BATTERY_SOC           — (opcionalno) battery state of charge
-    HA_ENT_PV_KWH_DAY            — entity_id za solar energy today (kWh) — opcionalno
-    HA_ENT_FEED_KWH_DAY          — feed_in energy today (kWh)
-    HA_ENT_CONS_KWH_DAY          — total consumption energy today (kWh)
-    HA_ENT_GRID_KWH_DAY          — grid consumption energy today (kWh)
+    HA_ENT_PV_W                  — solar power (W) — može biti lista
+    HA_ENT_FEED_W                — feed-in power (W)
+    HA_ENT_CONS_W                — total consumption (W) — opcionalno (computed ako fali)
+    HA_ENT_GRID_W                — grid consumption (W)
+    HA_ENT_AUTARKY               — autarky rate (0–100 ili 0–1) — opcionalno
+    HA_ENT_BATTERY_SOC           — opcionalno
+    HA_ENT_PV_KWH_DAY            — solar today (kWh ili Wh) — može biti lista
+    HA_ENT_FEED_KWH_DAY          — feed-in today
+    HA_ENT_CONS_KWH_DAY          — consumption today
+    HA_ENT_GRID_KWH_DAY          — grid consumption today
 
-Endpoint: GET <HA_URL>/api/states/<entity_id> → {"state":"<number>", ...}
+Auto-detektira unit (W vs kW, Wh vs kWh) i normalizira na W / kWh.
 """
 
 import logging
@@ -29,52 +29,100 @@ import sys
 from datetime import datetime
 
 import requests
+import urllib3
 
 DB_PATH = os.environ.get('DB_PATH', '/data/hep_energy.db')
+
+# Suppress self-signed warnings (HA često ima self-signed cert)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 log = logging.getLogger('ha_puller')
 
 
-def _get_state(ha_url: str, token: str, entity_id: str):
+def _get_state(ha_url: str, token: str, entity_id: str) -> tuple:
+    """Vrati (value: float, unit: str) ili (None, None)."""
     if not entity_id:
-        return None
+        return None, None
     url = f"{ha_url.rstrip('/')}/api/states/{entity_id}"
     try:
         r = requests.get(url, headers={'Authorization': f'Bearer {token}'}, timeout=10, verify=False)
         if r.status_code != 200:
             log.warning('HA %s: HTTP %s', entity_id, r.status_code)
-            return None
-        s = r.json().get('state')
+            return None, None
+        j = r.json()
+        s = j.get('state')
+        unit = (j.get('attributes', {}) or {}).get('unit_of_measurement', '')
         if s in (None, 'unknown', 'unavailable', ''):
-            return None
+            return None, unit
         try:
-            return float(s)
+            return float(s), unit
         except ValueError:
-            return None
+            return None, unit
     except Exception as e:
         log.warning('HA %s: %s', entity_id, e)
+        return None, None
+
+
+def _normalize_power(value, unit: str) -> float:
+    """Normaliziraj na W."""
+    if value is None:
         return None
+    u = (unit or '').lower()
+    if u == 'kw':
+        return value * 1000
+    return value  # W
+
+
+def _normalize_energy(value, unit: str) -> float:
+    """Normaliziraj na kWh."""
+    if value is None:
+        return None
+    u = (unit or '').lower()
+    if u == 'wh':
+        return value / 1000
+    if u == 'mwh':
+        return value * 1000
+    return value  # kWh
+
+
+def _sum_entities(ha_url: str, token: str, entity_csv: str, energy: bool = False) -> float:
+    """Sumiraj listu zarezom razdvojenih entity_id-eva (s normalizacijom unita)."""
+    if not entity_csv:
+        return None
+    total = None
+    for eid in entity_csv.split(','):
+        eid = eid.strip()
+        if not eid:
+            continue
+        v, unit = _get_state(ha_url, token, eid)
+        if v is None:
+            continue
+        v = _normalize_energy(v, unit) if energy else _normalize_power(v, unit)
+        total = (total or 0) + v
+    return total
 
 
 def pull_recent():
-    """Čitaj live W vrijednosti iz HA i spremi u sma_live."""
+    """Čitaj live W vrijednosti i spremi u sma_live."""
     ha_url = os.environ.get('HA_URL', '').strip()
     token  = os.environ.get('HA_TOKEN', '').strip()
     if not ha_url or not token:
-        log.error('HA_URL ili HA_TOKEN nisu postavljeni u .env')
+        log.error('HA_URL ili HA_TOKEN nisu postavljeni')
         return False
 
-    pv   = _get_state(ha_url, token, os.environ.get('HA_ENT_PV_W'))
-    feed = _get_state(ha_url, token, os.environ.get('HA_ENT_FEED_W'))
-    cons = _get_state(ha_url, token, os.environ.get('HA_ENT_CONS_W'))
-    grid = _get_state(ha_url, token, os.environ.get('HA_ENT_GRID_W'))
-    aut  = _get_state(ha_url, token, os.environ.get('HA_ENT_AUTARKY'))
-    soc  = _get_state(ha_url, token, os.environ.get('HA_ENT_BATTERY_SOC'))
+    pv   = _sum_entities(ha_url, token, os.environ.get('HA_ENT_PV_W'))
+    feed = _sum_entities(ha_url, token, os.environ.get('HA_ENT_FEED_W'))
+    grid = _sum_entities(ha_url, token, os.environ.get('HA_ENT_GRID_W'))
+    cons = _sum_entities(ha_url, token, os.environ.get('HA_ENT_CONS_W'))
+    if cons is None and pv is not None and feed is not None and grid is not None:
+        # Energy balance: pv = feed + cons_from_pv; cons = pv - feed + grid
+        cons = max(0, pv - feed + grid)
 
-    # Autarkija normalizacija: ako je 0–100, podijeli s 100
-    if aut is not None and aut > 1:
+    aut, _  = _get_state(ha_url, token, os.environ.get('HA_ENT_AUTARKY'))
+    if aut is not None and aut > 1.5:
         aut = aut / 100.0
+    soc, _ = _get_state(ha_url, token, os.environ.get('HA_ENT_BATTERY_SOC'))
 
     if pv is None and feed is None and cons is None:
         log.warning('HA: niti jedan W senzor ne vraća vrijednost. Provjeri HA_ENT_*.')
@@ -97,20 +145,23 @@ def pull_recent():
 
 
 def pull_today():
-    """Čitaj današnje kWh totale iz HA i spremi u sma_dnevna za danas."""
+    """Čitaj današnje kWh totale i spremi u sma_dnevna za danas."""
     ha_url = os.environ.get('HA_URL', '').strip()
     token  = os.environ.get('HA_TOKEN', '').strip()
     if not ha_url or not token:
         log.error('HA_URL ili HA_TOKEN nisu postavljeni')
         return False
 
-    pv_kwh   = _get_state(ha_url, token, os.environ.get('HA_ENT_PV_KWH_DAY'))
-    feed_kwh = _get_state(ha_url, token, os.environ.get('HA_ENT_FEED_KWH_DAY'))
-    cons_kwh = _get_state(ha_url, token, os.environ.get('HA_ENT_CONS_KWH_DAY'))
-    grid_kwh = _get_state(ha_url, token, os.environ.get('HA_ENT_GRID_KWH_DAY'))
+    pv_kwh   = _sum_entities(ha_url, token, os.environ.get('HA_ENT_PV_KWH_DAY'),   energy=True)
+    feed_kwh = _sum_entities(ha_url, token, os.environ.get('HA_ENT_FEED_KWH_DAY'), energy=True)
+    cons_kwh = _sum_entities(ha_url, token, os.environ.get('HA_ENT_CONS_KWH_DAY'), energy=True)
+    grid_kwh = _sum_entities(ha_url, token, os.environ.get('HA_ENT_GRID_KWH_DAY'), energy=True)
+
+    if cons_kwh is None and pv_kwh is not None and feed_kwh is not None and grid_kwh is not None:
+        cons_kwh = max(0, pv_kwh - feed_kwh + grid_kwh)
 
     if all(v is None for v in (pv_kwh, feed_kwh, cons_kwh, grid_kwh)):
-        log.info('HA: nema dnevnih kWh senzora konfiguriranih (HA_ENT_*_KWH_DAY).')
+        log.info('HA: nema dnevnih kWh senzora konfiguriranih.')
         return False
 
     today = datetime.now().strftime('%Y-%m-%d')
