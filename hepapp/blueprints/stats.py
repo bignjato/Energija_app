@@ -143,6 +143,111 @@ def api_mjesecni():
         conn.close()
 
 
+@bp.route('/peak-snaga')
+def api_peak_snaga():
+    """Vršna snaga iz 15-min očitanja.
+
+    kW = kwh_plus(15min) * 4  (jer je period 15 min = 1/4h)
+    Vraća peak za zadnji dan, tjedan, mjesec, godinu + timestamp peak-a.
+    """
+    conn = get_db()
+    try:
+        out = {}
+        for label, period in [
+            ('dan',      "datetime('now','-1 days')"),
+            ('tjedan',   "datetime('now','-7 days')"),
+            ('mjesec',   "datetime('now','-30 days')"),
+            ('godina',   "datetime('now','-365 days')"),
+            ('uvijek',   "datetime('1970-01-01')"),
+        ]:
+            row = conn.execute(f'''
+                SELECT ts, ROUND(kwh_plus * 4, 2) as kw, ROUND(kwh_minus * 4, 2) as kw_predaja
+                FROM ocitanja_15min
+                WHERE ts >= {period} AND ts <= datetime('now')
+                ORDER BY kwh_plus DESC LIMIT 1
+            ''').fetchone()
+            row_pred = conn.execute(f'''
+                SELECT ts, ROUND(kwh_minus * 4, 2) as kw
+                FROM ocitanja_15min
+                WHERE ts >= {period} AND ts <= datetime('now') AND kwh_minus > 0
+                ORDER BY kwh_minus DESC LIMIT 1
+            ''').fetchone()
+            out[label] = {
+                'peak_potrosnja_kw': row['kw'] if row else None,
+                'peak_potrosnja_ts': row['ts'] if row else None,
+                'peak_predaja_kw':   row_pred['kw'] if row_pred else None,
+                'peak_predaja_ts':   row_pred['ts'] if row_pred else None,
+            }
+        return jsonify(out)
+    finally:
+        conn.close()
+
+
+@bp.route('/vt-nt-trosak')
+def api_vt_nt_trosak():
+    """VT/NT trošak split (€) — koliko po tarifama u zadnjih 12 mj.
+
+    Koristi config VT_OD/VT_DO i tarifne cijene iz HEP_TARIFA.
+    """
+    from ..tariff import HEP_TARIFA
+    try:
+        vt_od = int(get_config('TARIFA_VT_OD', '7'))
+        vt_do = int(get_config('TARIFA_VT_DO', '21'))
+    except (TypeError, ValueError):
+        vt_od, vt_do = 7, 21
+    vt_hi = vt_do - 1
+
+    conn = get_db()
+    try:
+        rows = conn.execute(f'''
+            SELECT substr(ts,1,7) as mj,
+                   ROUND(SUM(CASE WHEN CAST(strftime('%H', ts) AS INT) BETWEEN ? AND ?
+                              THEN kwh_plus ELSE 0 END), 2) as vt_kwh,
+                   ROUND(SUM(CASE WHEN CAST(strftime('%H', ts) AS INT) BETWEEN ? AND ?
+                              THEN 0 ELSE kwh_plus END), 2) as nt_kwh,
+                   ROUND(SUM(kwh_minus), 2) as predaja_kwh
+            FROM ocitanja_satna
+            WHERE ts >= datetime('now','-12 months')
+            GROUP BY substr(ts,1,7)
+            ORDER BY mj DESC
+        ''', (vt_od, vt_hi, vt_od, vt_hi)).fetchall()
+
+        t = HEP_TARIFA
+        out = []
+        for r in rows:
+            vt_kwh = r['vt_kwh'] or 0
+            nt_kwh = r['nt_kwh'] or 0
+            pred   = r['predaja_kwh'] or 0
+            # neto trošak po tarifi (opskrba + mreža); bez fiksnih naknada i PDV
+            vt_eur = round(vt_kwh * (t['vt_opskrba'] + t['vt_distrib'] + t['vt_prijenos']), 2)
+            nt_eur = round(nt_kwh * (t['nt_opskrba'] + t['nt_distrib'] + t['nt_prijenos']), 2)
+            pred_eur = round(pred * t['otkup'], 2)
+            uk_kwh = vt_kwh + nt_kwh
+            out.append({
+                'mjesec':       r['mj'],
+                'vt_kwh':       vt_kwh,
+                'nt_kwh':       nt_kwh,
+                'predaja_kwh':  pred,
+                'vt_eur':       vt_eur,
+                'nt_eur':       nt_eur,
+                'predaja_eur':  pred_eur,
+                'vt_perc':      round(100 * vt_kwh / uk_kwh, 1) if uk_kwh else None,
+                'neto_trosak':  round(vt_eur + nt_eur - pred_eur, 2),
+            })
+
+        return jsonify({
+            'vt_od': vt_od, 'vt_do': vt_do,
+            'mjeseci': out,
+            'tarife': {
+                'vt_kwh_eur': round(t['vt_opskrba'] + t['vt_distrib'] + t['vt_prijenos'], 6),
+                'nt_kwh_eur': round(t['nt_opskrba'] + t['nt_distrib'] + t['nt_prijenos'], 6),
+                'otkup':      t['otkup'],
+            },
+        })
+    finally:
+        conn.close()
+
+
 @bp.route('/vt-kalibracija')
 def api_vt_kalibracija():
     """Izračunaj stvarni VT udio iz HEP satnih očitanja.

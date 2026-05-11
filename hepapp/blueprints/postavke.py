@@ -89,6 +89,25 @@ def api_postavke():
     })
 
 
+@bp.route('/mjerno-mjesto')
+def api_mjerno_mjesto():
+    """Info o mjernom mjestu(ima) iz HEP ODS."""
+    conn = get_db()
+    try:
+        rows = conn.execute('''
+            SELECT m.id, m.naziv, m.adresa, m.oib, m.tip, m.napon, m.created_at,
+                   (SELECT MIN(ts) FROM ocitanja_15min WHERE mjerno_mjesto=m.id) as prvi_zapis,
+                   (SELECT MAX(ts) FROM ocitanja_15min WHERE mjerno_mjesto=m.id) as zadnji_zapis,
+                   (SELECT COUNT(*) FROM ocitanja_15min WHERE mjerno_mjesto=m.id) as n_15min,
+                   (SELECT ROUND(SUM(kwh_plus),2) FROM ocitanja_dnevna WHERE mjerno_mjesto=m.id) as uk_potrosnja,
+                   (SELECT ROUND(SUM(kwh_minus),2) FROM ocitanja_dnevna WHERE mjerno_mjesto=m.id) as uk_predaja
+            FROM mjerna_mjesta m
+        ''').fetchall()
+        return jsonify([dict(r) for r in rows])
+    finally:
+        conn.close()
+
+
 @bp.route('/status')
 def api_postavke_status():
     conn = get_db()

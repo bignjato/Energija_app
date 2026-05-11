@@ -261,6 +261,18 @@ tr:hover td { background: var(--surface2); }
       <div class="sub">HEP potrošnja + SMA solar</div>
       <div class="cw h250"><canvas id="cSatni"></canvas></div>
     </div>
+
+    <!-- Peak snaga KPI -->
+    <div class="cc" style="margin-bottom:14px">
+      <h3>⚡ Vršna snaga (iz 15-min HEP očitanja)</h3>
+      <div class="sub">kW = kWh × 4 iz 15-minutnih očitanja</div>
+      <div class="kpi-strip" id="peak-kpi" style="margin-top:10px">
+        <div class="kpi cons"><div class="kpi-lbl">Peak ovaj tjedan</div><div class="kpi-val" id="pk-week">—</div><div class="kpi-sub" id="pk-week-ts">—</div></div>
+        <div class="kpi cons"><div class="kpi-lbl">Peak ovaj mjesec</div><div class="kpi-val" id="pk-month">—</div><div class="kpi-sub" id="pk-month-ts">—</div></div>
+        <div class="kpi cons"><div class="kpi-lbl">Peak ova godina</div><div class="kpi-val" id="pk-year">—</div><div class="kpi-sub" id="pk-year-ts">—</div></div>
+        <div class="kpi feed"><div class="kpi-lbl">Peak predaja u mrežu</div><div class="kpi-val" id="pk-pred">—</div><div class="kpi-sub" id="pk-pred-ts">zadnja godina</div></div>
+      </div>
+    </div>
     <div class="cc" style="margin-bottom:0">
       <h3>Dnevna bilanca — 30 dana</h3>
       <div class="sub">Potrošnja / Predaja / Solar</div>
@@ -316,6 +328,23 @@ tr:hover td { background: var(--surface2); }
     </div>
     <button class="btn btn-primary" onclick="saveTarifa()">Spremi tarifu</button>
     <span id="fStatus" style="margin-left:12px;font-size:12px;color:var(--muted)"></span>
+  </div>
+
+  <!-- VT/NT trošak split (iz HEP satnih očitanja) -->
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-title">⚡ VT / NT trošak split — zadnjih 12 mj.</div>
+    <div class="sub" style="margin-bottom:10px;color:var(--muted);font-size:12px" id="vtnt-info">Računam iz HEP satnih očitanja...</div>
+    <div class="cw h280"><canvas id="cVtNt"></canvas></div>
+    <div class="tbl-wrap" style="margin-top:10px">
+      <table>
+        <thead><tr>
+          <th>Mjesec</th>
+          <th>VT kWh</th><th>NT kWh</th><th>VT %</th>
+          <th>VT €</th><th>NT €</th><th>Predaja €</th><th>Neto trošak €</th>
+        </tr></thead>
+        <tbody id="tVtNt"></tbody>
+      </table>
+    </div>
   </div>
 
   <div class="g-fin">
@@ -609,6 +638,12 @@ tr:hover td { background: var(--surface2); }
   <!-- STATUS SUSTAVA -->
   <div class="g-auto" id="status-kpi" style="margin-bottom:14px"></div>
 
+  <!-- MJERNO MJESTO INFO -->
+  <div class="form-section" style="margin-bottom:14px">
+    <h3>🏭 Mjerno mjesto (HEP ODS)</h3>
+    <div id="omm-info" style="font-size:13px;color:var(--muted)">Učitavam…</div>
+  </div>
+
   <!-- KONFIGURACIJA -->
   <div class="form-section" style="margin-bottom:14px">
     <h3>🔧 Konfiguracija</h3>
@@ -791,11 +826,12 @@ function goTo(name,el){
   document.getElementById('page-'+name).classList.add('active');
   el.classList.add('active');
   if(name==='usporedba') renderUsporedba();
-  if(name==='financije') renderFin();
+  if(name==='financije') { renderFin(); loadVtNtTrosak(); }
   if(name==='racuni'&&!window.RACUNI) loadRacuni();
   if(name==='optimalno'&&!OPT) loadOpt();
   if(name==='povijest'&&!POV) { brziIzbor('30dana'); }
-  if(name==='postavke') loadPostavke();
+  if(name==='postavke') { loadPostavke(); loadOmmInfo(); }
+  if(name==='pregled') loadPeakSnaga();
 }
 
 // ---- HELPERS ----
@@ -1725,8 +1761,105 @@ function changeSyncInterval() {
   if (sek > 0) syncTimer = setInterval(load, sek * 1000);
 }
 
+// ===== HEP ODS: Peak snaga, OMM info, VT/NT trošak =====
+
+async function loadPeakSnaga() {
+  try {
+    const r = await fetch('/api/stats/peak-snaga', {credentials:'same-origin'});
+    const d = await r.json();
+    const setKpi = (id, idTs, period, key) => {
+      const el  = document.getElementById(id);
+      const ets = document.getElementById(idTs);
+      const v = d[period];
+      if (!v) return;
+      el.textContent  = (v[key+'_kw'] ?? '—') + ' kW';
+      ets.textContent = v[key+'_ts'] ? v[key+'_ts'].replace('T',' ').slice(0,16) : '—';
+    };
+    setKpi('pk-week',  'pk-week-ts',  'tjedan',  'peak_potrosnja');
+    setKpi('pk-month', 'pk-month-ts', 'mjesec',  'peak_potrosnja');
+    setKpi('pk-year',  'pk-year-ts',  'godina',  'peak_potrosnja');
+    setKpi('pk-pred',  'pk-pred-ts',  'godina',  'peak_predaja');
+  } catch(e) { console.error('peak-snaga', e); }
+}
+
+async function loadOmmInfo() {
+  const box = document.getElementById('omm-info');
+  if (!box) return;
+  try {
+    const r = await fetch('/api/postavke/mjerno-mjesto', {credentials:'same-origin'});
+    const rows = await r.json();
+    if (!rows.length) { box.innerHTML = '<em>Nema mjernih mjesta — pokreni HEP scraper.</em>'; return; }
+    let html = '';
+    for (const m of rows) {
+      const tipBadge = m.tip === 'Potrosac'
+        ? '<span style="color:#22d3ee">Potrošač</span>'
+        : '<span style="color:#fbbf24">Proizvođač</span>';
+      html += `
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px">
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Kupac</div><div style="font-family:var(--mono);color:var(--text)">${m.naziv||'—'}</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Šifra OMM</div><div style="font-family:var(--mono);color:var(--text)">${m.id}</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">OIB</div><div style="font-family:var(--mono)">${m.oib||'—'}</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Tip</div><div>${tipBadge}</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Adresa</div><div style="font-size:12px">${m.adresa||'—'}</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Raspon očitanja</div><div style="font-family:var(--mono);font-size:12px">${(m.prvi_zapis||'').slice(0,10)} → ${(m.zadnji_zapis||'').slice(0,10)}</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">15-min zapisa</div><div style="font-family:var(--mono)">${(m.n_15min||0).toLocaleString()}</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Ukupna potrošnja</div><div style="font-family:var(--mono);color:#22d3ee">${(m.uk_potrosnja||0).toLocaleString()} kWh</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Ukupna predaja</div><div style="font-family:var(--mono);color:#fbbf24">${(m.uk_predaja||0).toLocaleString()} kWh</div></div>
+      </div>`;
+    }
+    box.innerHTML = html;
+  } catch(e) { box.innerHTML = '<em style="color:#f87171">Greška: '+e+'</em>'; }
+}
+
+let _vtntChart = null;
+async function loadVtNtTrosak() {
+  try {
+    const r = await fetch('/api/stats/vt-nt-trosak', {credentials:'same-origin'});
+    const d = await r.json();
+    const mj = (d.mjeseci || []).slice().reverse();  // chronological for chart
+    document.getElementById('vtnt-info').textContent =
+      `VT prozor: ${d.vt_od}-${d.vt_do}h · cijene: VT ${(d.tarife.vt_kwh_eur*100).toFixed(2)} c/kWh · NT ${(d.tarife.nt_kwh_eur*100).toFixed(2)} c/kWh · otkup ${(d.tarife.otkup*100).toFixed(2)} c/kWh`;
+
+    const ctx = document.getElementById('cVtNt');
+    if (_vtntChart) _vtntChart.destroy();
+    _vtntChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: mj.map(m => m.mjesec),
+        datasets: [
+          { label: 'VT trošak (€)',   data: mj.map(m => m.vt_eur),      backgroundColor: 'rgba(248,113,113,.7)', stack:'cost' },
+          { label: 'NT trošak (€)',   data: mj.map(m => m.nt_eur),      backgroundColor: 'rgba(34,211,238,.7)',  stack:'cost' },
+          { label: 'Predaja (€)',     data: mj.map(m => -m.predaja_eur),backgroundColor: 'rgba(34,197,94,.7)',   stack:'cost' },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        scales: { x:{stacked:true}, y:{stacked:true, ticks:{callback:v=>v+' €'}} },
+      },
+    });
+
+    // Tablica (kronoloski desc)
+    const tbody = document.getElementById('tVtNt');
+    tbody.innerHTML = (d.mjeseci || []).map(m => `
+      <tr>
+        <td style="font-family:var(--mono)">${m.mjesec}</td>
+        <td style="text-align:right;font-family:var(--mono)">${m.vt_kwh}</td>
+        <td style="text-align:right;font-family:var(--mono)">${m.nt_kwh}</td>
+        <td style="text-align:right;font-family:var(--mono)">${m.vt_perc ?? '—'}%</td>
+        <td style="text-align:right;font-family:var(--mono);color:#f87171">${m.vt_eur}</td>
+        <td style="text-align:right;font-family:var(--mono);color:#22d3ee">${m.nt_eur}</td>
+        <td style="text-align:right;font-family:var(--mono);color:#22c55e">-${m.predaja_eur}</td>
+        <td style="text-align:right;font-family:var(--mono);font-weight:700">${m.neto_trosak}</td>
+      </tr>`).join('');
+  } catch(e) {
+    document.getElementById('vtnt-info').textContent = 'Greška: ' + e;
+  }
+}
+
 load();
 syncTimer = setInterval(load, 60000);
+// Učitaj peak snagu odmah (Pregled je default tab)
+loadPeakSnaga();
 </script>
 </body>
 </html>
