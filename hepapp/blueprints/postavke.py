@@ -13,7 +13,14 @@ from ..db import DB_PATH, get_db, get_config, set_config
 bp = Blueprint('postavke', __name__, url_prefix='/api/postavke')
 
 # Ključevi pohranjeni isključivo u config tablici (ne u .env)
-DB_ONLY_KEYS = ['VT_UDIO_PERC']
+DB_ONLY_KEYS = [
+    'VT_UDIO_PERC',
+    'PV_NOMINAL_KW',         # npr. 30 (kWp)
+    'PV_COMMISSION_DATE',    # YYYY-MM-DD
+    'PV_CO2_FACTOR_G_KWH',   # default 640 (HR mix)
+    'PV_FEED_TARIFF_EUR',    # cijena otkupa za reimbursement; default = HEP_TARIFA.otkup
+    'HA_ENT_POWER_LIMIT',    # entity_id za inverter power limit (W)
+]
 
 
 @bp.route('', methods=['GET', 'POST'])

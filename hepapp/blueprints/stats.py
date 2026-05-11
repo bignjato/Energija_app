@@ -295,6 +295,104 @@ def api_procjena_trenutni():
     })
 
 
+@bp.route('/plant-info')
+def api_plant_info():
+    """Plant metapodaci + agregati za live dashboard widgets.
+
+    Vraća (s SunnyPortal-feature parity):
+      - nominal_kw, commission_date  (iz config)
+      - co2_today_kg, co2_total_kg   (PV × CO2_FACTOR_G_KWH)
+      - reimbursement_today_eur, reimbursement_total_eur (PV × otkup)
+      - sufficiency_perc, consumption_perc  (live iz sma_live)
+      - pv_today_kwh, pv_month_kwh, pv_year_kwh, pv_total_kwh
+      - power_limit_w, power_limit_perc  (iz HA ako konfigurirano)
+    """
+    from datetime import datetime
+    from ..tariff import HEP_TARIFA
+    import os, requests, urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    nominal_kw     = float(get_config('PV_NOMINAL_KW', '0') or 0)
+    commission     = get_config('PV_COMMISSION_DATE', '')
+    co2_factor     = float(get_config('PV_CO2_FACTOR_G_KWH', '640') or 640)
+    feed_tariff    = float(get_config('PV_FEED_TARIFF_EUR', '') or HEP_TARIFA.get('otkup', 0.064379))
+    power_limit_ent = get_config('HA_ENT_POWER_LIMIT', '')
+
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    mj_str    = datetime.now().strftime('%Y-%m')
+    god_str   = datetime.now().strftime('%Y')
+
+    conn = get_db()
+    try:
+        pv_today = conn.execute(
+            "SELECT pv_generation_kwh FROM sma_dnevna WHERE datum=?", (today_str,)
+        ).fetchone()
+        pv_today = pv_today['pv_generation_kwh'] if pv_today and pv_today['pv_generation_kwh'] else 0
+
+        pv_month = conn.execute(
+            "SELECT ROUND(SUM(pv_generation_kwh),2) as s FROM sma_dnevna WHERE substr(datum,1,7)=?",
+            (mj_str,)
+        ).fetchone()['s'] or 0
+
+        pv_year = conn.execute(
+            "SELECT ROUND(SUM(pv_generation_kwh),2) as s FROM sma_dnevna WHERE substr(datum,1,4)=?",
+            (god_str,)
+        ).fetchone()['s'] or 0
+
+        pv_total = conn.execute(
+            "SELECT ROUND(SUM(pv_generation_kwh),2) as s FROM sma_dnevna"
+        ).fetchone()['s'] or 0
+
+        live = conn.execute(
+            "SELECT pv_generation_w, feed_in_w, total_consumption_w, external_consumption_w, "
+            "autarky_rate, self_consumption_rate FROM sma_live ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    # Power limit iz HA (ako konfiguriran)
+    power_limit_w = None
+    power_limit_perc = None
+    if power_limit_ent:
+        try:
+            ha_url = os.environ.get('HA_URL', '').strip()
+            ha_tok = os.environ.get('HA_TOKEN', '').strip()
+            if ha_url and ha_tok:
+                r = requests.get(
+                    f"{ha_url.rstrip('/')}/api/states/{power_limit_ent}",
+                    headers={'Authorization': f'Bearer {ha_tok}'},
+                    timeout=8, verify=False,
+                )
+                if r.status_code == 200:
+                    state = r.json().get('state')
+                    if state not in (None, 'unknown', 'unavailable'):
+                        power_limit_w = float(state)
+                        if nominal_kw > 0:
+                            power_limit_perc = round(100 * power_limit_w / (nominal_kw * 1000), 1)
+        except Exception:
+            pass
+
+    return jsonify({
+        'nominal_kw':           nominal_kw,
+        'commission_date':      commission,
+        'co2_today_kg':         round(pv_today * co2_factor / 1000, 1),
+        'co2_total_kg':         round(pv_total * co2_factor / 1000, 1),
+        'reimbursement_today_eur': round(pv_today * feed_tariff, 2),
+        'reimbursement_total_eur': round(pv_total * feed_tariff, 2),
+        'pv_today_kwh':         pv_today,
+        'pv_month_kwh':         pv_month,
+        'pv_year_kwh':          pv_year,
+        'pv_total_kwh':         pv_total,
+        'live': dict(live) if live else None,
+        'sufficiency_perc':     round((live['autarky_rate'] or 0) * 100, 1) if live and live['autarky_rate'] is not None else None,
+        'consumption_perc':     round((live['self_consumption_rate'] or 0) * 100, 1) if live and live['self_consumption_rate'] is not None else None,
+        'power_limit_w':        power_limit_w,
+        'power_limit_perc':     power_limit_perc,
+        'co2_factor_g_kwh':     co2_factor,
+        'feed_tariff':          feed_tariff,
+    })
+
+
 @bp.route('/peak-snaga')
 def api_peak_snaga():
     """Vršna snaga iz 15-min očitanja.

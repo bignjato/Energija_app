@@ -239,6 +239,38 @@ tr:hover td { background: var(--surface2); }
     </div>
   </div>
 
+  <!-- ====== FNE info (Sunny Portal parity) ====== -->
+  <div class="g2" style="margin-bottom:14px">
+    <div class="card">
+      <div class="card-title">🏭 Informacije o postrojenju</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;font-size:13px">
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Nominalna snaga</div><div id="pi-nom" style="font-size:18px;font-family:var(--mono);color:#22d3ee">—</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">U pogonu od</div><div id="pi-comm" style="font-size:14px;font-family:var(--mono)">—</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Ograničenje snage</div><div id="pi-plim" style="font-size:14px;font-family:var(--mono)">—</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Self-sufficiency</div><div id="pi-suff" style="font-size:18px;font-family:var(--mono);color:#22c55e">—</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Self-consumption</div><div id="pi-cons" style="font-size:18px;font-family:var(--mono);color:#fbbf24">—</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">🌱 Eko & financije</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;font-size:13px">
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">CO₂ izbjegnut · danas</div><div id="pi-co2t" style="font-size:18px;font-family:var(--mono);color:#22c55e">—</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">CO₂ izbjegnut · ukupno</div><div id="pi-co2u" style="font-size:18px;font-family:var(--mono);color:#22c55e">—</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Prihod · danas</div><div id="pi-rt" style="font-size:18px;font-family:var(--mono);color:#fbbf24">—</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Prihod · ukupno</div><div id="pi-ru" style="font-size:18px;font-family:var(--mono);color:#fbbf24">—</div></div>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:8px" id="pi-rate-info"></div>
+    </div>
+  </div>
+
+  <!-- Energija po periodu -->
+  <div class="g-auto" style="margin-bottom:14px">
+    <div class="kpi solar"><div class="kpi-lbl">PV · danas</div><div class="kpi-val" id="pi-pv-d">—</div><div class="kpi-sub">kWh</div></div>
+    <div class="kpi solar"><div class="kpi-lbl">PV · ovaj mjesec</div><div class="kpi-val" id="pi-pv-m">—</div><div class="kpi-sub">kWh</div></div>
+    <div class="kpi solar"><div class="kpi-lbl">PV · ova godina</div><div class="kpi-val" id="pi-pv-y">—</div><div class="kpi-sub">kWh</div></div>
+    <div class="kpi solar"><div class="kpi-lbl">PV · ukupno</div><div class="kpi-val" id="pi-pv-t">—</div><div class="kpi-sub">kWh (od pogona)</div></div>
+  </div>
+
   <div class="g-auto">
     <div class="kpi cons"><div class="kpi-lbl">Ovaj tjedan (od pon) · potrošnja</div><div class="kpi-val" id="k-tj-h">—</div><div class="kpi-sub" id="k-tj-h-sub">kWh iz mreže</div></div>
     <div class="kpi solar"><div class="kpi-lbl">Ovaj tjedan (od pon) · solar</div><div class="kpi-val" id="k-tj-s">—</div><div class="kpi-sub">kWh</div></div>
@@ -867,7 +899,7 @@ function goTo(name,el){
   if(name==='optimalno'&&!OPT) loadOpt();
   if(name==='povijest'&&!POV) { brziIzbor('30dana'); }
   if(name==='postavke') { loadPostavke(); loadOmmInfo(); }
-  if(name==='pregled') loadPeakSnaga();
+  if(name==='pregled') { loadPeakSnaga(); loadPlantInfo(); }
 }
 
 // ---- HELPERS ----
@@ -2020,6 +2052,34 @@ async function loadProcjenaTrenutni() {
   } catch(e) {
     box.innerHTML = '<em style="color:#f87171">Greška: '+e+'</em>';
   }
+}
+
+async function loadPlantInfo() {
+  try {
+    const r = await fetch('/api/stats/plant-info', {credentials:'same-origin'});
+    const d = await r.json();
+    set('pi-nom',  d.nominal_kw ? d.nominal_kw + ' kWp' : '—');
+    set('pi-comm', d.commission_date || '—');
+    if (d.power_limit_w != null) {
+      set('pi-plim', `${(d.power_limit_w/1000).toFixed(1)} kW`
+          + (d.power_limit_perc != null ? ` (${d.power_limit_perc}%)` : ''));
+    } else {
+      set('pi-plim', '—');
+    }
+    set('pi-suff', d.sufficiency_perc != null ? d.sufficiency_perc + '%' : '—');
+    set('pi-cons', d.consumption_perc != null ? d.consumption_perc + '%' : '—');
+
+    set('pi-co2t', d.co2_today_kg + ' kg');
+    set('pi-co2u', d.co2_total_kg >= 1000 ? (d.co2_total_kg/1000).toFixed(2)+' t' : d.co2_total_kg+' kg');
+    set('pi-rt',   d.reimbursement_today_eur.toFixed(2) + ' €');
+    set('pi-ru',   d.reimbursement_total_eur.toFixed(2) + ' €');
+    set('pi-rate-info', `CO₂ faktor ${d.co2_factor_g_kwh} g/kWh · otkup ${(d.feed_tariff*100).toFixed(2)} c/kWh`);
+
+    set('pi-pv-d', f1(d.pv_today_kwh));
+    set('pi-pv-m', f1(d.pv_month_kwh));
+    set('pi-pv-y', f1(d.pv_year_kwh));
+    set('pi-pv-t', f1(d.pv_total_kwh));
+  } catch(e) { console.error('plant-info', e); }
 }
 
 async function loadPeakSnaga() {
