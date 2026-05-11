@@ -239,6 +239,73 @@ tr:hover td { background: var(--surface2); }
     </div>
   </div>
 
+  <!-- ====== Energy flow vizualizacija + Weather ====== -->
+  <div class="g2" style="margin-bottom:14px">
+    <div class="card">
+      <div class="card-title">⚡ Energy flow — live</div>
+      <div id="energy-flow" style="position:relative;height:200px;display:flex;align-items:center;justify-content:space-around;font-family:var(--mono);font-size:13px">
+        <!-- Populated by JS -->
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">🌤️ Vrijeme — <span id="weather-loc">lokacija</span></div>
+      <div id="weather" style="display:flex;align-items:center;gap:20px;padding:12px 0;font-size:14px">
+        <div style="font-size:48px" id="weather-icon">⏳</div>
+        <div style="flex:1">
+          <div style="font-size:32px;color:var(--text);font-family:var(--mono)" id="weather-temp">—</div>
+          <div style="font-size:13px;color:var(--muted)" id="weather-desc">Učitavam…</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:6px" id="weather-fc"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== Cijene (iz HEP računa) ====== -->
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-title">💶 Aktivne cijene (HEP)</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:10px" id="cijene-src">—</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;font-size:13px">
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase">Prosj. cijena kupnje</div>
+        <div id="cij-avg" style="font-size:22px;font-family:var(--mono);color:#f87171">—</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px" id="cij-avg-sub">s PDV-om, prema VT udjelu</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase">VT s PDV-om</div>
+        <div id="cij-vt" style="font-size:20px;font-family:var(--mono)">—</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px" id="cij-vt-sub">opskrba+distrib+prijenos+sol+OIE</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase">NT s PDV-om</div>
+        <div id="cij-nt" style="font-size:20px;font-family:var(--mono)">—</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">isti sastav, NT cijene</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase">Otkup (prodaja)</div>
+        <div id="cij-otkup" style="font-size:20px;font-family:var(--mono);color:#22c55e">—</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px" id="cij-otkup-sub">prema modelu tarife</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase">Mjesečna pretplata</div>
+        <div id="cij-pret" style="font-size:20px;font-family:var(--mono);color:#22d3ee">—</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px" id="cij-pret-sub">opskrba + mjerna mjernina</div>
+      </div>
+    </div>
+    <details style="margin-top:12px;font-size:12px;color:var(--muted)">
+      <summary style="cursor:pointer;color:var(--accent)">Detalji sastavnica</summary>
+      <table style="width:100%;margin-top:8px;border-collapse:collapse;font-family:var(--mono);font-size:12px">
+        <tbody id="cij-detalji"></tbody>
+      </table>
+    </details>
+  </div>
+
+  <!-- ====== Power limit history (24h) ====== -->
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-title">⚙️ Ograničenje snage — zadnjih 24h</div>
+    <div class="cw h200"><canvas id="cPowLimit"></canvas></div>
+    <div style="font-size:11px;color:var(--muted);margin-top:6px" id="pl-info"></div>
+  </div>
+
   <!-- ====== FNE info (Sunny Portal parity) ====== -->
   <div class="g2" style="margin-bottom:14px">
     <div class="card">
@@ -899,7 +966,7 @@ function goTo(name,el){
   if(name==='optimalno'&&!OPT) loadOpt();
   if(name==='povijest'&&!POV) { brziIzbor('30dana'); }
   if(name==='postavke') { loadPostavke(); loadOmmInfo(); }
-  if(name==='pregled') { loadPeakSnaga(); loadPlantInfo(); }
+  if(name==='pregled') { loadPeakSnaga(); loadPlantInfo(); loadCijene(); loadWeather(); loadEnergyFlow(); loadPowerLimit(); }
 }
 
 // ---- HELPERS ----
@@ -2052,6 +2119,148 @@ async function loadProcjenaTrenutni() {
   } catch(e) {
     box.innerHTML = '<em style="color:#f87171">Greška: '+e+'</em>';
   }
+}
+
+async function loadCijene() {
+  try {
+    const r = await fetch('/api/stats/cijene', {credentials:'same-origin'});
+    const d = await r.json();
+    set('cijene-src', `Izvor: ${d.izvor}`);
+    set('cij-avg',   (d.avg_full_eur_kwh*100).toFixed(2)+' c/kWh');
+    set('cij-avg-sub', `s PDV ${(d.pdv*100).toFixed(0)}% · VT udio ${d.vt_udio_perc}%`);
+    set('cij-vt',    (d.vt_full_eur_kwh*100).toFixed(2)+' c/kWh');
+    set('cij-nt',    (d.nt_full_eur_kwh*100).toFixed(2)+' c/kWh');
+    set('cij-otkup', (d.otkup*100).toFixed(2)+' c/kWh');
+    set('cij-otkup-sub', `VT otkup ${(d.vt_otkup*100).toFixed(2)} c/kWh`);
+    set('cij-pret',  d.pretplata_ukupno.toFixed(2)+' €/mj');
+    set('cij-pret-sub', `opskrba ${d.pretplata_opskrba.toFixed(3)} + mjerna ${d.pretplata_mjerna.toFixed(3)}`);
+
+    const rows = [
+      ['VT opskrba',  d.vt_opskrba],
+      ['NT opskrba',  d.nt_opskrba],
+      ['VT distribucija', d.vt_distrib],
+      ['NT distribucija', d.nt_distrib],
+      ['VT prijenos', d.vt_prijenos],
+      ['NT prijenos', d.nt_prijenos],
+      ['Solidarna naknada', d.solidarna],
+      ['OIE naknada', d.oie],
+      ['Opskrbna naknada (€/mj)', d.pretplata_opskrba],
+      ['Mjerna mjernina (€/mj)',  d.pretplata_mjerna],
+      ['PDV', d.pdv*100 + ' %'],
+    ];
+    document.getElementById('cij-detalji').innerHTML = rows.map(r =>
+      `<tr><td style="padding:3px 8px">${r[0]}</td>
+       <td style="padding:3px 8px;text-align:right">${typeof r[1]==='string'?r[1]:r[1].toFixed(6)+' €/kWh'}</td></tr>`
+    ).join('');
+  } catch(e) { console.error('cijene', e); }
+}
+
+const WMO_CODES = {
+  0:['☀️','Vedro'], 1:['🌤️','Pretežno vedro'], 2:['⛅','Djelomično oblačno'], 3:['☁️','Oblačno'],
+  45:['🌫️','Magla'], 48:['🌫️','Magla s injem'],
+  51:['🌦️','Slaba rosulja'], 53:['🌦️','Rosulja'], 55:['🌧️','Jaka rosulja'],
+  61:['🌧️','Slaba kiša'], 63:['🌧️','Kiša'], 65:['🌧️','Jaka kiša'],
+  71:['🌨️','Slab snijeg'], 73:['🌨️','Snijeg'], 75:['❄️','Jak snijeg'],
+  80:['🌦️','Pljuskovi'], 81:['🌦️','Jaki pljuskovi'], 82:['⛈️','Vrlo jaki pljuskovi'],
+  95:['⛈️','Grmljavinsko nevrijeme'], 96:['⛈️','Grmljavina s tučom'], 99:['⛈️','Jaka grmljavina'],
+};
+
+async function loadWeather() {
+  try {
+    const r = await fetch('/api/stats/weather', {credentials:'same-origin'});
+    const d = await r.json();
+    if (d.error) { set('weather-desc', 'API: '+d.error); return; }
+    const cur = d.current || {};
+    const wmo = WMO_CODES[cur.weather_code] || ['🌡️','—'];
+    set('weather-icon', wmo[0]);
+    set('weather-temp', (cur.temperature_2m ?? '—') + '°C');
+    set('weather-desc', `${wmo[1]} · vjetar ${(cur.wind_speed_10m ?? 0).toFixed(0)} km/h · oblačnost ${cur.cloud_cover ?? 0}%`);
+    set('weather-loc', d.timezone ? d.timezone.replace('_',' ') : 'lokacija');
+    // Forecast 2 dana
+    const daily = d.daily || {};
+    const fc = [];
+    for (let i = 1; i <= 2 && i < (daily.time||[]).length; i++) {
+      const w = WMO_CODES[daily.weather_code[i]] || ['🌡️',''];
+      const day = new Date(daily.time[i]).toLocaleDateString('hr-HR',{weekday:'short'});
+      fc.push(`${day} ${w[0]} ${daily.temperature_2m_min[i]?.toFixed(0)}–${daily.temperature_2m_max[i]?.toFixed(0)}°C`);
+    }
+    set('weather-fc', fc.join(' · '));
+  } catch(e) { set('weather-desc', 'Greška: '+e); }
+}
+
+function loadEnergyFlow() {
+  // SVG flow vizualizacija na temelju D.sma_live (već dohvaćen kroz /api/data)
+  if (!D || !D.sma_live) return;
+  const l = D.sma_live;
+  const pv   = Math.round(l.pv_generation_w || 0);
+  const feed = Math.round(l.feed_in_w || 0);
+  const cons = Math.round(l.total_consumption_w || 0);
+  const grid = Math.round(l.external_consumption_w || 0);
+  const direct = Math.max(0, pv - feed);  // kuća iz solara
+
+  const flowToFeed = feed > 0;
+  const flowToGrid = grid > 0;
+  const arrow = (active, dir) => active
+    ? `<div style="font-size:24px;color:#22d3ee;animation:flowblink 1.5s infinite">${dir}</div>`
+    : `<div style="font-size:24px;color:#1f2d3d">${dir}</div>`;
+
+  document.getElementById('energy-flow').innerHTML = `
+    <style>@keyframes flowblink{0%,100%{opacity:.4}50%{opacity:1}}</style>
+    <div style="text-align:center">
+      <div style="font-size:36px">☀️</div>
+      <div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-top:4px">PV</div>
+      <div style="font-size:20px;color:#fbbf24;font-family:var(--mono)">${pv} W</div>
+    </div>
+    ${arrow(pv>0, '→')}
+    <div style="text-align:center">
+      <div style="font-size:36px">🏠</div>
+      <div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-top:4px">Kuća</div>
+      <div style="font-size:20px;color:#a78bfa;font-family:var(--mono)">${cons} W</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:2px">solar: ${direct}W</div>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+      ${flowToFeed ? '<div style="font-size:18px;color:#22c55e;animation:flowblink 1.5s infinite">↑</div>' : '<div style="font-size:18px;color:#1f2d3d">↑</div>'}
+      ${flowToGrid ? '<div style="font-size:18px;color:#f87171;animation:flowblink 1.5s infinite">↓</div>' : '<div style="font-size:18px;color:#1f2d3d">↓</div>'}
+    </div>
+    <div style="text-align:center">
+      <div style="font-size:36px">⚡</div>
+      <div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-top:4px">Mreža</div>
+      <div style="font-size:14px;font-family:var(--mono)">
+        <div style="color:#22c55e">↑ ${feed} W</div>
+        <div style="color:#f87171">↓ ${grid} W</div>
+      </div>
+    </div>
+  `;
+}
+
+let _powLimitChart = null;
+async function loadPowerLimit() {
+  try {
+    const r = await fetch('/api/stats/power-limit-history', {credentials:'same-origin'});
+    const d = await r.json();
+    const info = document.getElementById('pl-info');
+    if (d.note) { info.textContent = d.note; return; }
+    if (!d.series || !d.series.length) { info.textContent = 'Nema podataka za 24h.'; return; }
+
+    const labels = d.series.map(s => s.ts.slice(11,16));
+    const data   = d.series.map(s => s.w / 1000);  // W → kW
+    if (_powLimitChart) _powLimitChart.destroy();
+    _powLimitChart = new Chart(document.getElementById('cPowLimit'), {
+      type: 'line',
+      data: { labels, datasets: [{
+        label: 'Power limit (kW)', data,
+        borderColor: '#22d3ee', backgroundColor: 'rgba(34,211,238,.15)',
+        borderWidth: 2, pointRadius: 0, tension: .2, fill: true,
+      }]},
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        scales: { y: { beginAtZero: true, ticks: { callback: v => v + ' kW' } } },
+        plugins: { legend: { display: false } },
+      },
+    });
+    const min = Math.min(...data), max = Math.max(...data);
+    info.textContent = `Entity: ${d.entity} · raspon: ${min.toFixed(1)}–${max.toFixed(1)} kW (${d.series.length} zapisa)`;
+  } catch(e) { document.getElementById('pl-info').textContent = 'Greška: '+e; }
 }
 
 async function loadPlantInfo() {

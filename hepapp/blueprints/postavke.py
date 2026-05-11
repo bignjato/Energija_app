@@ -19,6 +19,8 @@ DB_ONLY_KEYS = [
     'PV_COMMISSION_DATE',    # YYYY-MM-DD
     'PV_CO2_FACTOR_G_KWH',   # default 640 (HR mix)
     'PV_FEED_TARIFF_EUR',    # cijena otkupa za reimbursement; default = HEP_TARIFA.otkup
+    'PV_LAT',                # latitude (npr. 45.732 za Odru/Lukavec)
+    'PV_LON',                # longitude (npr. 16.087)
     'HA_ENT_POWER_LIMIT',    # entity_id za inverter power limit (W)
 ]
 

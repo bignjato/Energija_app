@@ -295,6 +295,136 @@ def api_procjena_trenutni():
     })
 
 
+@bp.route('/cijene')
+def api_cijene():
+    """Stvarne aktivne cijene za prikaz korisniku.
+
+    Izvori (po prioritetu):
+      1. Zadnji uvezeni HEP račun (pretplata, mjerna_mjernina)
+      2. HEP_TARIFA konstante (VT/NT/distrib/prijenos/solidarna/oie/PDV/otkup)
+      3. VT_UDIO_PERC iz config-a
+    """
+    from ..tariff import HEP_TARIFA, get_vt_udio
+    conn = get_db()
+    try:
+        row = conn.execute('''
+            SELECT pretplata, mjerna_mjernina, datum_racuna, period, model_tarife
+            FROM racuni
+            WHERE pretplata IS NOT NULL OR mjerna_mjernina IS NOT NULL
+            ORDER BY datum_racuna DESC, period DESC LIMIT 1
+        ''').fetchone()
+    finally:
+        conn.close()
+
+    t = HEP_TARIFA
+    pretplata_opskrba = (row['pretplata'] if row else None) or t['opskrbna_mj']
+    pretplata_mjerna  = (row['mjerna_mjernina'] if row else None) or t['mjerna_mj']
+    vt_udio = get_vt_udio()
+
+    # Puna cijena VT/NT po kWh (uključujući sve sastavnice + PDV)
+    vt_full = (t['vt_opskrba'] + t['vt_distrib'] + t['vt_prijenos']
+               + t['solidarna'] + t['oie']) * (1 + t['pdv'])
+    nt_full = (t['nt_opskrba'] + t['nt_distrib'] + t['nt_prijenos']
+               + t['solidarna'] + t['oie']) * (1 + t['pdv'])
+    avg_full = vt_full * vt_udio + nt_full * (1 - vt_udio)
+
+    return jsonify({
+        'izvor':              row['period'] + ' (' + (row['model_tarife'] or '') + ')' if row else 'default HEP_TARIFA',
+        'pretplata_opskrba':  round(pretplata_opskrba, 3),
+        'pretplata_mjerna':   round(pretplata_mjerna, 3),
+        'pretplata_ukupno':   round(pretplata_opskrba + pretplata_mjerna, 3),
+        'vt_opskrba':         t['vt_opskrba'],
+        'nt_opskrba':         t['nt_opskrba'],
+        'vt_distrib':         t['vt_distrib'],
+        'nt_distrib':         t['nt_distrib'],
+        'vt_prijenos':        t['vt_prijenos'],
+        'nt_prijenos':        t['nt_prijenos'],
+        'solidarna':          t['solidarna'],
+        'oie':                t['oie'],
+        'pdv':                t['pdv'],
+        'otkup':              t['otkup'],
+        'vt_otkup':           t['vt_otkup'],
+        'nt_otkup':           t['nt_otkup'],
+        'vt_udio_perc':       round(vt_udio * 100, 1),
+        'vt_full_eur_kwh':    round(vt_full, 6),
+        'nt_full_eur_kwh':    round(nt_full, 6),
+        'avg_full_eur_kwh':   round(avg_full, 6),
+    })
+
+
+@bp.route('/weather')
+def api_weather():
+    """Open-Meteo passthrough za lokaciju postrojenja.
+
+    Config keys: PV_LAT, PV_LON (default = Odra/Lukavec).
+    """
+    import requests
+    lat = float(get_config('PV_LAT', '45.732') or 45.732)
+    lon = float(get_config('PV_LON', '16.087') or 16.087)
+    try:
+        r = requests.get(
+            'https://api.open-meteo.com/v1/forecast',
+            params={
+                'latitude': lat,
+                'longitude': lon,
+                'current': 'temperature_2m,cloud_cover,weather_code,is_day,wind_speed_10m',
+                'daily': 'weather_code,temperature_2m_max,temperature_2m_min,cloud_cover_mean',
+                'forecast_days': 3,
+                'timezone': 'auto',
+            },
+            timeout=8,
+        )
+        if r.status_code != 200:
+            return jsonify({'error': f'open-meteo HTTP {r.status_code}'}), 502
+        return jsonify(r.json())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+
+
+@bp.route('/power-limit-history')
+def api_power_limit_history():
+    """24h history inverter power limit-a iz HA."""
+    import os, requests, urllib3
+    from datetime import datetime, timedelta
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    ent = get_config('HA_ENT_POWER_LIMIT', '')
+    if not ent:
+        return jsonify({'series': [], 'note': 'HA_ENT_POWER_LIMIT nije konfiguriran'})
+    ha_url = os.environ.get('HA_URL', '').strip()
+    ha_tok = os.environ.get('HA_TOKEN', '').strip()
+    if not ha_url or not ha_tok:
+        return jsonify({'series': [], 'note': 'HA_URL/HA_TOKEN nisu postavljeni'})
+
+    start = (datetime.utcnow() - timedelta(hours=24)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+    try:
+        r = requests.get(
+            f"{ha_url.rstrip('/')}/api/history/period/{start}",
+            headers={'Authorization': f'Bearer {ha_tok}'},
+            params={'filter_entity_id': ent, 'minimal_response': 'true'},
+            timeout=15, verify=False,
+        )
+        if r.status_code != 200:
+            return jsonify({'series': [], 'note': f'HA HTTP {r.status_code}'})
+        data = r.json()
+        if not data or not data[0]:
+            return jsonify({'series': []})
+        rows = data[0]
+        series = []
+        for s in rows:
+            ts = s.get('last_changed') or s.get('last_updated')
+            val = s.get('state')
+            if val in (None, 'unknown', 'unavailable'):
+                continue
+            try:
+                series.append({'ts': ts, 'w': float(val)})
+            except ValueError:
+                pass
+        return jsonify({'series': series, 'entity': ent})
+    except Exception as e:
+        return jsonify({'series': [], 'note': str(e)})
+
+
 @bp.route('/plant-info')
 def api_plant_info():
     """Plant metapodaci + agregati za live dashboard widgets.
