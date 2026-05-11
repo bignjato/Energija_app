@@ -926,12 +926,12 @@ function renderPregled(){
     document.getElementById('lv-aut-bar').style.width=Math.min(100,a)+'%';
   }
 
-  // SMA — danas (live)
-  const dS=D.sma_dnevna.find(r=>r.datum===today());
-  set('d-sma-p',  dS?f1(dS.pv_generation_kwh):'—');
-  set('d-sma-fee',dS?f1(dS.feed_in_kwh):'—');
-  set('d-sma-con',dS?f1(dS.total_consumption_kwh):'—');
-  set('d-sma-grd',dS?f1(dS.grid_consumption_kwh):'—');
+  // SMA — danas (live agregirano iz sma_live)
+  const sT = D.sma_today || D.sma_dnevna.find(r=>r.datum===today()) || {};
+  set('d-sma-p',  sT.pv_generation_kwh != null     ? f1(sT.pv_generation_kwh)     : '—');
+  set('d-sma-fee',sT.feed_in_kwh != null           ? f1(sT.feed_in_kwh)           : '—');
+  set('d-sma-con',sT.total_consumption_kwh != null ? f1(sT.total_consumption_kwh) : '—');
+  set('d-sma-grd',sT.grid_consumption_kwh != null  ? f1(sT.grid_consumption_kwh)  : '—');
 
   // HEP — zadnji dan u bazi (može kasniti 24h)
   const danas=today();

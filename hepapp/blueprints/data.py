@@ -95,12 +95,53 @@ def api_data():
             if row:
                 tarifa = dict(row)
 
+        # Danas zbirno iz sma_live (jer sma_dnevna ne piše tijekom dana)
+        sma_today = None
+        if has_sma:
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            t = conn.execute('''
+                SELECT
+                    COUNT(*) as n,
+                    MIN(ts) as ts_min,
+                    MAX(ts) as ts_max,
+                    AVG(feed_in_w) as avg_feed,
+                    AVG(total_consumption_w) as avg_cons,
+                    AVG(external_consumption_w) as avg_grid,
+                    AVG(pv_generation_w) as avg_pv,
+                    AVG(autarky_rate) as avg_aut
+                FROM sma_live
+                WHERE date(ts) = ?
+            ''', (today_str,)).fetchone()
+            if t and t['n']:
+                # protekla aktivna sati od prvog sample-a do zadnjeg
+                try:
+                    from datetime import datetime as _dt
+                    t1 = _dt.fromisoformat(t['ts_min'].rstrip('Z'))
+                    t2 = _dt.fromisoformat(t['ts_max'].rstrip('Z'))
+                    proteklo_h = max((t2 - t1).total_seconds() / 3600.0, 1/12)
+                except Exception:
+                    proteklo_h = t['n'] / 12.0  # ~5min sample → 12/h
+                sma_today = {
+                    'pv_generation_kwh':    round((t['avg_pv'] or 0) * proteklo_h / 1000, 2),
+                    'feed_in_kwh':          round((t['avg_feed'] or 0) * proteklo_h / 1000, 2),
+                    'total_consumption_kwh':round((t['avg_cons'] or 0) * proteklo_h / 1000, 2),
+                    'grid_consumption_kwh': round((t['avg_grid'] or 0) * proteklo_h / 1000, 2),
+                    'autarky_rate':         round((t['avg_aut'] or 0), 4),
+                    'proteklo_h':           round(proteklo_h, 1),
+                    'n_samples':            t['n'],
+                }
+            # Ako sma_dnevna za danas ima pv ali ne i feed/cons → preferiraj sma_dnevna pv
+            today_row = next((r for r in sma_dnevna if r['datum'] == today_str), None)
+            if today_row and today_row['pv_generation_kwh'] and sma_today:
+                sma_today['pv_generation_kwh'] = today_row['pv_generation_kwh']
+
         return jsonify({
             'satna':      [dict(r) for r in reversed(satna)],
             'dnevna':     [dict(r) for r in reversed(dnevna)],
             'sma_live':   sma_live,
             'sma_dnevna': list(reversed(sma_dnevna)),
             'sma_satna':  list(reversed(sma_satna)),
+            'sma_today':  sma_today,
             'tarifa':     tarifa,
             'efektivne_cijene': _efektivne_cijene(),
             'ts':         datetime.now().isoformat(),
