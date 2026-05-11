@@ -175,8 +175,11 @@ def spremi_krivulje(conn, podaci, mjerno_mjesto, je_minus=False):
             continue
         try:
             if je_minus:
+                # Predaja A-: upsert ažurira SAMO kwh_minus, ne dira kwh_plus
                 conn.execute(
-                    "INSERT OR IGNORE INTO ocitanja_15min (mjerno_mjesto,ts,kwh_plus,kwh_minus) VALUES (?,?,0,?)",
+                    """INSERT INTO ocitanja_15min (mjerno_mjesto,ts,kwh_plus,kwh_minus)
+                       VALUES (?,?,0,?)
+                       ON CONFLICT(mjerno_mjesto,ts) DO UPDATE SET kwh_minus=excluded.kwh_minus""",
                     (mjerno_mjesto, ts, val)
                 )
             else:
