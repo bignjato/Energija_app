@@ -25,18 +25,36 @@ run() {
     "$@" 2>&1 | stamp | tee -a "$LOG"
 }
 
+# Birač SMA scrapera: novi službeni API ili stari Sunny Portal scrape
+sma_recent() {
+    if [ "${SMA_USE_API:-false}" = "true" ]; then
+        run python /app/sma_api_scraper.py --only recent
+        run python /app/sma_api_scraper.py --only day
+    else
+        run python /app/sma_scraper.py
+    fi
+}
+
+sma_history() {
+    if [ "${SMA_USE_API:-false}" = "true" ]; then
+        run python /app/sma_api_scraper.py --only month
+    else
+        run python /app/sma_history_import.py
+    fi
+}
+
 sleep 30
-echo "[boot] Prva sinkronizacija..." | tee -a "$LOG"
+echo "[boot] Prva sinkronizacija (SMA_USE_API=${SMA_USE_API:-false})..." | tee -a "$LOG"
 run python /app/hep_scraper.py --dani 30
-run python /app/sma_scraper.py
-run python /app/sma_history_import.py
+sma_recent
+sma_history
 run python /app/ha_sender.py
 
 COUNTER=0
 while true; do
     sleep 300
     COUNTER=$((COUNTER + 1))
-    run python /app/sma_scraper.py
+    sma_recent
 
     # HEP + HA svakih sat (12 × 5min)
     if [ $((COUNTER % 12)) -eq 0 ]; then
@@ -48,7 +66,7 @@ while true; do
     # SMA history jednom dnevno (288 × 5min = 24h)
     if [ $((COUNTER % 288)) -eq 0 ]; then
         echo "[daily] SMA history import..." | tee -a "$LOG"
-        run python /app/sma_history_import.py
+        sma_history
     fi
 
     # Backup baze u 02:00 + off-site upload
