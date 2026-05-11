@@ -1,9 +1,9 @@
 #!/bin/sh
-# Sync orchestrator — sve outpute logiraj kroz `ts` za timestamp.
-# Logiranje: stdout (docker logs) + opcionalno /data/sync.log s rotacijom.
+# Sync orchestrator — sve outpute logiraj kroz `stamp` za timestamp.
+# Logiranje: stdout (docker logs) + /data/sync.log s rotacijom (~10MB).
 
 LOG=/data/sync.log
-LOG_MAX_KB=10240   # ~10 MB
+LOG_MAX_KB=10240
 
 stamp() {
     while IFS= read -r line; do
@@ -51,7 +51,7 @@ while true; do
         run python /app/sma_history_import.py
     fi
 
-    # Backup baze u 02:00
+    # Backup baze u 02:00 + off-site upload
     HOUR=$(date +%H)
     if [ $((COUNTER % 288)) -eq 144 ] && [ "$HOUR" = "02" ]; then
         BACKUP_DIR=/data/backups
@@ -60,5 +60,8 @@ while true; do
         cp /data/hep_energy.db $BACKUP_DIR/hep_energy_$DATUM.db
         ls -t $BACKUP_DIR/*.db | tail -n +8 | xargs rm -f 2>/dev/null
         echo "[backup] $BACKUP_DIR/hep_energy_$DATUM.db" | tee -a "$LOG"
+
+        # Off-site upload (rclone ili rsync) — best effort, ne ruši loop
+        /bin/sh /app/offsite_backup.sh || echo "[offsite] failed (ignored)" | tee -a "$LOG"
     fi
 done
