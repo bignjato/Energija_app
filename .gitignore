@@ -5,3 +5,7 @@ __pycache__/
 *.pyc
 *.log
 hep_energy.db
+
+# Backups created during deploys
+*.bak.*
+.env.bak.*

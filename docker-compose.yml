@@ -2,6 +2,7 @@ services:
 
   hep-web:
     build: .
+    image: hep_ha:latest
     container_name: hep-energy-web
     restart: unless-stopped
     env_file: .env
@@ -12,14 +13,14 @@ services:
     ports:
       - "5000:5000"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:5000/health"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:5000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 15s
 
   hep-sync:
-    build: .
+    image: hep_ha:latest
     container_name: hep-energy-sync
     restart: unless-stopped
     env_file: .env
@@ -28,8 +29,11 @@ services:
     volumes:
       - hep-data:/data
     command: ["/bin/sh", "/app/sync_loop.sh"]
+    healthcheck:
+      disable: true
     depends_on:
-      - hep-web
+      hep-web:
+        condition: service_started
 
 volumes:
   hep-data:

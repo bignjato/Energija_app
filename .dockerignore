@@ -1,0 +1,15 @@
+.env
+.env.example
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+*.log
+*.db
+data/
+backups/
+README.md
+CLAUDE.md
+deploy.sh
+=
