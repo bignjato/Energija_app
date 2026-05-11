@@ -58,6 +58,16 @@ def parse_hep_bill(text: str) -> dict:
         'kwh_vt': None, 'kwh_nt': None,
         'kwh_plus': None, 'kwh_minus': None,
         'opskrba': None, 'mreza': None, 'pdv': None,
+        # nova polja
+        'dug': None,                 # nepodmireno na dan izdavanja računa
+        'pretplata': None,           # opskrbna naknada €/mj
+        'mjerna_mjernina': None,     # naknada za mjernu uslugu €/mj
+        'kamata': None,
+        'datum_racuna': None,
+        'datum_dospijeca': None,
+        'model_tarife': None,        # npr. "HEPI bijeli — E-K-N-BIJ1"
+        'sifra_kupca': None,
+        'broj_racuna': None,
         'raw_excerpt': text[:2000],
     }
 
@@ -159,5 +169,54 @@ def parse_hep_bill(text: str) -> dict:
         r'PDV\s*\d*\s*%?\s*\(osnovica:[^)]+\)\s*([\d\.,]+)',
         r'PDV[^\n]{0,40}?([\d\.,]+)\s*€',
     ], text))
+
+    # --- Dug (nepodmireno) ---
+    # "Vaš dug 1.054,72 €"
+    # ili "Na dan izdavanja računa nepodmireni iznos je 1.054,72 eura"
+    res['dug'] = _to_float(_search([
+        r'Va[šs]\s*dug[^\d]{0,30}([\d\.,]+)\s*€',
+        r'nepodmireni\s*iznos\s*je\s*([\d\.,]+)\s*(?:eur[a]?)',
+    ], text))
+
+    # --- Pretplata (opskrbna naknada €/mj) ---
+    # "opskrbna naknada po 0,982 EUR/mjesec"
+    res['pretplata'] = _to_float(_search([
+        r'opskrbna\s*naknada\s*po\s*([\d\.,]+)\s*EUR/mjesec',
+    ], text))
+
+    # --- Mjerna mjernina (€/mj) ---
+    # "naknada za mjernu uslugu (br.mjeseci) po 1,983 EUR"
+    res['mjerna_mjernina'] = _to_float(_search([
+        r'naknada\s*za\s*mjernu\s*uslugu[^0-9]{0,40}([\d\.,]+)\s*EUR',
+    ], text))
+
+    # --- Kamata ---
+    # "Kamata - PDV nije obračunat ... 1,15 €"
+    res['kamata'] = _to_float(_search([
+        r'Kamata[^\n]{0,80}?([\d\.,]+)\s*€',
+    ], text))
+
+    # --- Datum računa & dospijeća ---
+    m = re.search(r'Datum\s*ra[čc]una[:\s]*(\d{1,2})\.(\d{1,2})\.(\d{4})', text, flags=re.IGNORECASE)
+    if m:
+        res['datum_racuna'] = f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
+    m = re.search(r'Platite\s*do[:\s]*(\d{1,2})\.(\d{1,2})\.(\d{4})', text, flags=re.IGNORECASE)
+    if m:
+        res['datum_dospijeca'] = f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
+
+    # --- Tarifni model ---
+    # "Model: HEPI bijeli" + "tarifni model: E-K-N-BIJ1"
+    model = _search([r'Model:\s*([A-Za-zČĆŠĐŽčćšđž0-9 \-]+?)(?:\n|tarifni|$)'], text)
+    tarif = _search([r'tarifni\s*model:\s*([A-Za-z0-9\-]+)'], text)
+    if model and tarif:
+        res['model_tarife'] = f"{model.strip()} — {tarif.strip()}"
+    elif model:
+        res['model_tarife'] = model.strip()
+    elif tarif:
+        res['model_tarife'] = tarif.strip()
+
+    # --- Šifra kupca i broj računa ---
+    res['sifra_kupca'] = _search([r'[ŠS]ifra\s*kupca:\s*([\d]+)'], text)
+    res['broj_racuna'] = _search([r'Broj\s*ra[čc]una:\s*([\d\-]+)'], text)
 
     return res

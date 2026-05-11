@@ -143,6 +143,119 @@ def api_mjesecni():
         conn.close()
 
 
+@bp.route('/procjena-trenutni')
+def api_procjena_trenutni():
+    """Procjena računa za TEKUĆI mjesec na temelju dosadašnje potrošnje.
+
+    Logika:
+      - Sumiraj potrošnju/predaju od 1. do danas iz ocitanja_satna
+      - Računaj prorate na cijeli mjesec (× n_dana_mjesec / proteklo_dana)
+      - Primijeni HEP tarife + VT/NT slider + pretplate
+      - Vrati: proteklo, projicirano za mjesec, postotak proteklog mjeseca
+    """
+    from datetime import datetime
+    from calendar import monthrange
+    from ..tariff import HEP_TARIFA, get_vt_udio, izracunaj_racun
+
+    now = datetime.now()
+    god, mj = now.year, now.month
+    n_dana_mj = monthrange(god, mj)[1]
+    proteklo_dana = now.day  # uključno do današnjeg dana
+
+    conn = get_db()
+    try:
+        try:
+            vt_od = int(get_config('TARIFA_VT_OD', '7'))
+            vt_do = int(get_config('TARIFA_VT_DO', '21'))
+        except (TypeError, ValueError):
+            vt_od, vt_do = 7, 21
+        vt_hi = vt_do - 1
+
+        mj_str = f'{god:04d}-{mj:02d}'
+        row = conn.execute(f'''
+            SELECT
+                ROUND(SUM(kwh_plus), 2) as kwh_plus,
+                ROUND(SUM(kwh_minus), 2) as kwh_minus,
+                ROUND(SUM(CASE WHEN CAST(strftime('%H', ts) AS INT) BETWEEN ? AND ?
+                            THEN kwh_plus ELSE 0 END), 2) as kwh_vt,
+                ROUND(SUM(CASE WHEN CAST(strftime('%H', ts) AS INT) BETWEEN ? AND ?
+                            THEN 0 ELSE kwh_plus END), 2) as kwh_nt,
+                MAX(ts) as zadnji_ts,
+                MIN(ts) as prvi_ts
+            FROM ocitanja_satna
+            WHERE substr(ts,1,7) = ?
+        ''', (vt_od, vt_hi, vt_od, vt_hi, mj_str)).fetchone()
+
+        # zadnji uvezeni račun za pretplatu (ako postoji)
+        last_bill = conn.execute('''
+            SELECT pretplata, mjerna_mjernina FROM racuni
+            WHERE pretplata IS NOT NULL
+            ORDER BY datum_racuna DESC LIMIT 1
+        ''').fetchone()
+    finally:
+        conn.close()
+
+    kp = row['kwh_plus'] or 0
+    km = row['kwh_minus'] or 0
+    kvt = row['kwh_vt'] or 0
+    knt = row['kwh_nt'] or 0
+    # broj dana s podacima (dani s ts u tekućem mjesecu)
+    try:
+        prvi = row['prvi_ts']
+        zadnji = row['zadnji_ts']
+        if prvi and zadnji:
+            dan1 = int(prvi[8:10])
+            danN = int(zadnji[8:10])
+            dani_s_podacima = max(1, danN - dan1 + 1)
+        else:
+            dani_s_podacima = 1
+    except Exception:
+        dani_s_podacima = max(1, proteklo_dana)
+
+    # Procjena (prorata)
+    faktor = n_dana_mj / dani_s_podacima
+    proj_kp = round(kp * faktor, 2)
+    proj_km = round(km * faktor, 2)
+
+    # Stvarni VT udio za sad
+    vt_udio_real = (kvt / kp) if kp > 0 else get_vt_udio()
+
+    # Trošak: do sad
+    proteklo_racun = izracunaj_racun(kp, km, dani_s_podacima, vt_udio=vt_udio_real)
+    # Procjena za cijeli mjesec
+    proj_racun = izracunaj_racun(proj_kp, proj_km, n_dana_mj, vt_udio=vt_udio_real)
+
+    # Pretplate (fiksni dio)
+    pret_opskrba = (last_bill['pretplata'] if last_bill else None) or HEP_TARIFA['opskrbna_mj']
+    pret_mjerna  = (last_bill['mjerna_mjernina'] if last_bill else None) or HEP_TARIFA['mjerna_mj']
+    fiksno = round(pret_opskrba + pret_mjerna, 2)
+
+    return jsonify({
+        'mjesec':              mj_str,
+        'n_dana_mjesec':       n_dana_mj,
+        'dani_s_podacima':     dani_s_podacima,
+        'proteklo_dana':       proteklo_dana,
+        'postotak_mjeseca':    round(100 * dani_s_podacima / n_dana_mj, 1),
+        'kwh_plus_proteklo':   kp,
+        'kwh_minus_proteklo':  km,
+        'kwh_vt_proteklo':     kvt,
+        'kwh_nt_proteklo':     knt,
+        'kwh_plus_procjena':   proj_kp,
+        'kwh_minus_procjena':  proj_km,
+        'racun_proteklo':      proteklo_racun,
+        'racun_procjena':      proj_racun,
+        'fiksne_naknade':      fiksno,
+        'vt_udio_stvarni':     round(100 * vt_udio_real, 1),
+        'tarifa': {
+            'vt_kwh': round(HEP_TARIFA['vt_opskrba'] + HEP_TARIFA['vt_distrib'] + HEP_TARIFA['vt_prijenos'], 6),
+            'nt_kwh': round(HEP_TARIFA['nt_opskrba'] + HEP_TARIFA['nt_distrib'] + HEP_TARIFA['nt_prijenos'], 6),
+            'pretplata': fiksno,
+            'pdv':       HEP_TARIFA['pdv'],
+            'otkup':     HEP_TARIFA['otkup'],
+        },
+    })
+
+
 @bp.route('/peak-snaga')
 def api_peak_snaga():
     """Vršna snaga iz 15-min očitanja.

@@ -320,6 +320,18 @@ tr:hover td { background: var(--surface2); }
     <span id="fStatus" style="margin-left:12px;font-size:12px;color:var(--muted)"></span>
   </div>
 
+  <!-- Stanje HEP računa -->
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-title">📋 Stanje HEP računa</div>
+    <div id="hep-stanje" style="font-size:13px;color:var(--muted)">Učitavam…</div>
+  </div>
+
+  <!-- Procjena tekućeg mjeseca -->
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-title">🔮 Procjena tekućeg mjeseca</div>
+    <div id="hep-procjena" style="font-size:13px;color:var(--muted)">Računam iz HEP satnih očitanja…</div>
+  </div>
+
   <!-- VT/NT trošak split (iz HEP satnih očitanja) -->
   <div class="card" style="margin-bottom:14px">
     <div class="card-title">⚡ VT / NT trošak split — zadnjih 12 mj.</div>
@@ -816,7 +828,7 @@ function goTo(name,el){
   document.getElementById('page-'+name).classList.add('active');
   el.classList.add('active');
   if(name==='usporedba') renderUsporedba();
-  if(name==='financije') { renderFin(); loadVtNtTrosak(); }
+  if(name==='financije') { renderFin(); loadVtNtTrosak(); loadHepStanje(); loadProcjenaTrenutni(); }
   if(name==='racuni'&&!window.RACUNI) loadRacuni();
   if(name==='optimalno'&&!OPT) loadOpt();
   if(name==='povijest'&&!POV) { brziIzbor('30dana'); }
@@ -1083,6 +1095,7 @@ async function addRacun(){
   const parts = period.split('/');
   const periodIso = parts.length===2 ? `${parts[1]}-${parts[0].padStart(2,'0')}` : period;
 
+  const extra = window._pdfExtra || {};
   await fetch('/api/racuni', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({
@@ -1095,12 +1108,25 @@ async function addRacun(){
       opskrba: +document.getElementById('r-opskrba').value||null,
       mreza: +document.getElementById('r-mreza').value||null,
       pdv: +document.getElementById('r-pdv-iznos').value||null,
+      dug:             extra.dug ?? null,
+      pretplata:       extra.pretplata ?? null,
+      mjerna_mjernina: extra.mjerna_mjernina ?? null,
+      kamata:          extra.kamata ?? null,
+      datum_racuna:    extra.datum_racuna ?? null,
+      datum_dospijeca: extra.datum_dospijeca ?? null,
+      model_tarife:    extra.model_tarife ?? null,
+      sifra_kupca:     extra.sifra_kupca ?? null,
+      broj_racuna:     extra.broj_racuna ?? null,
     })
   });
+  window._pdfExtra = {};
   showToast('Račun spremljen!');
   window.RACUNI = null;
   loadRacuni();
 }
+
+// PDF parser output → spremi proširena polja u skrivene globale za POST
+window._pdfExtra = {};
 
 async function uploadPdf(){
   const fileEl = document.getElementById('r-pdf');
@@ -1113,7 +1139,6 @@ async function uploadPdf(){
     const r = await fetch('/api/racuni/upload-pdf', {method:'POST', body: fd, credentials:'same-origin'});
     const d = await r.json();
     if (!d.ok) { status.textContent='Greška: ' + (d.error||'parser fail'); return; }
-    // Pre-fill form fields s onim što je parser našao
     const setIf = (id, v) => { if (v !== null && v !== undefined) document.getElementById(id).value = v; };
     setIf('r-period',   d.period);
     setIf('r-iznos',    d.iznos);
@@ -1123,10 +1148,28 @@ async function uploadPdf(){
     setIf('r-opskrba',  d.opskrba);
     setIf('r-mreza',    d.mreza);
     setIf('r-pdv-iznos',d.pdv);
-    // Saznaj koliko polja je popunjeno
-    const filled = ['period','iznos','kwh_vt','kwh_nt','kwh_minus','opskrba','mreza','pdv']
-      .filter(k => d[k] !== null && d[k] !== undefined).length;
-    status.textContent = `✓ Prepoznato ${filled}/8 polja iz "${d.filename}". Provjeri i klikni "Spremi račun".`;
+    // Proširena polja — nemaju input, drže se u globalu i šalju kroz addRacun
+    window._pdfExtra = {
+      dug:             d.dug,
+      pretplata:       d.pretplata,
+      mjerna_mjernina: d.mjerna_mjernina,
+      kamata:          d.kamata,
+      datum_racuna:    d.datum_racuna,
+      datum_dospijeca: d.datum_dospijeca,
+      model_tarife:    d.model_tarife,
+      sifra_kupca:     d.sifra_kupca,
+      broj_racuna:     d.broj_racuna,
+    };
+    const allFields = ['period','iznos','kwh_vt','kwh_nt','kwh_minus','opskrba','mreza','pdv',
+                       'dug','pretplata','mjerna_mjernina','kamata','datum_racuna','datum_dospijeca','model_tarife'];
+    const filled = allFields.filter(k => d[k] !== null && d[k] !== undefined).length;
+    const extras = [];
+    if (d.dug != null)             extras.push(`dug ${d.dug.toFixed(2)} €`);
+    if (d.datum_dospijeca)         extras.push(`dospijeće ${d.datum_dospijeca}`);
+    if (d.model_tarife)            extras.push(d.model_tarife);
+    status.innerHTML = `✓ Prepoznato ${filled}/${allFields.length} polja iz "${d.filename}".`
+      + (extras.length ? ` <span style="color:var(--muted)">(${extras.join(' · ')})</span>` : '')
+      + ` Klikni "Spremi račun".`;
   } catch(e) {
     status.textContent = 'Network error: ' + e;
   }
@@ -1752,6 +1795,103 @@ function changeSyncInterval() {
 }
 
 // ===== HEP ODS: Peak snaga, OMM info, VT/NT trošak =====
+
+async function loadHepStanje() {
+  const box = document.getElementById('hep-stanje');
+  if (!box) return;
+  try {
+    const r = await fetch('/api/racuni/stanje', {credentials:'same-origin'});
+    const d = await r.json();
+    if (!d.has_data) {
+      box.innerHTML = `<em>Nema unesenog HEP računa — uploadaj PDF u sekciji "Dodaj stvarni HEP račun".</em>
+        <div style="margin-top:8px">Mjesečna pretplata po default tarifima: <strong style="color:var(--text)">${d.mjesecna_pretplata} €</strong>
+        (opskrbna ${d.pretplata_opskrba} € + mjerna ${d.pretplata_mjerna} €).</div>`;
+      return;
+    }
+    const dugColor = d.dug > 0 ? '#f87171' : '#22c55e';
+    const danasISO = new Date().toISOString().slice(0,10);
+    const overdueDays = d.datum_dospijeca && d.datum_dospijeca < danasISO
+      ? Math.floor((new Date(danasISO) - new Date(d.datum_dospijeca)) / 86400000)
+      : null;
+    const dospijece_html = d.datum_dospijeca
+      ? `<strong style="color:${overdueDays > 0 ? '#f87171' : 'var(--text)'}">${d.datum_dospijeca}</strong>`
+        + (overdueDays > 0 ? ` <span style="color:#f87171">(zakasnilo ${overdueDays} d)</span>` : '')
+      : '—';
+    box.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:14px">
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px">
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Zadnji račun</div>
+          <div style="font-size:22px;color:var(--text);font-family:var(--mono);margin-top:4px">${(d.iznos||0).toFixed(2)} €</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">period ${d.period||'—'} · ${d.datum_racuna||'—'}</div>
+        </div>
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px">
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Nepodmireni dug</div>
+          <div style="font-size:22px;color:${dugColor};font-family:var(--mono);margin-top:4px">${(d.dug ?? 0).toFixed(2)} €</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">${d.kamata ? 'uklj. kamata '+d.kamata.toFixed(2)+' €' : 'na dan računa'}</div>
+        </div>
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px">
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Dospijeće</div>
+          <div style="font-size:16px;margin-top:4px;font-family:var(--mono)">${dospijece_html}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">datum plaćanja računa</div>
+        </div>
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px">
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Mjesečna pretplata</div>
+          <div style="font-size:22px;color:#22d3ee;font-family:var(--mono);margin-top:4px">${d.mjesecna_pretplata.toFixed(2)} €</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">opskrba ${d.pretplata_opskrba.toFixed(3)} + mjerna ${d.pretplata_mjerna.toFixed(3)}</div>
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--muted);font-family:var(--mono)">
+        ${d.model_tarife ? '⚡ '+d.model_tarife+' · ' : ''}
+        ${d.broj_racuna ? 'br. '+d.broj_racuna+' · ' : ''}
+        ${d.sifra_kupca ? 'šifra kupca '+d.sifra_kupca : ''}
+      </div>`;
+  } catch(e) {
+    box.innerHTML = '<em style="color:#f87171">Greška: '+e+'</em>';
+  }
+}
+
+async function loadProcjenaTrenutni() {
+  const box = document.getElementById('hep-procjena');
+  if (!box) return;
+  try {
+    const r = await fetch('/api/stats/procjena-trenutni', {credentials:'same-origin'});
+    const d = await r.json();
+    if (!d.kwh_plus_proteklo && d.kwh_plus_proteklo !== 0) {
+      box.innerHTML = '<em>Nema podataka iz HEP scrapera za tekući mjesec.</em>';
+      return;
+    }
+    const ukupno_proj = (d.racun_procjena + d.fiksne_naknade).toFixed(2);
+    box.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:10px">
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px">
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Proteklo (${d.dani_s_podacima}/${d.n_dana_mjesec} dana)</div>
+          <div style="font-size:22px;color:var(--text);font-family:var(--mono);margin-top:4px">${d.racun_proteklo.toFixed(2)} €</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">potrošnja ${d.kwh_plus_proteklo} kWh · predaja ${d.kwh_minus_proteklo} kWh</div>
+        </div>
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px">
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Procjena cijeli mjesec</div>
+          <div style="font-size:22px;color:#fbbf24;font-family:var(--mono);margin-top:4px">${ukupno_proj} €</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">+ fiksno ${d.fiksne_naknade.toFixed(2)} € pretplate</div>
+        </div>
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px">
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Projicirano kWh</div>
+          <div style="font-size:18px;color:var(--text);font-family:var(--mono);margin-top:4px">${d.kwh_plus_procjena} ↓ / ${d.kwh_minus_procjena} ↑</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">potrošnja / predaja u mrežu</div>
+        </div>
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px">
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">VT udio stvarni</div>
+          <div style="font-size:22px;color:#22d3ee;font-family:var(--mono);margin-top:4px">${d.vt_udio_stvarni}%</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">VT ${d.kwh_vt_proteklo} / NT ${d.kwh_nt_proteklo} kWh</div>
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--muted)">
+        Procjena vrijedi za <strong>${d.mjesec}</strong>, ${d.postotak_mjeseca}% mjeseca odrađeno.
+        Tarife: VT ${(d.tarifa.vt_kwh*100).toFixed(2)} c/kWh · NT ${(d.tarifa.nt_kwh*100).toFixed(2)} c/kWh · otkup ${(d.tarifa.otkup*100).toFixed(2)} c/kWh · PDV ${(d.tarifa.pdv*100).toFixed(0)}%.
+      </div>`;
+  } catch(e) {
+    box.innerHTML = '<em style="color:#f87171">Greška: '+e+'</em>';
+  }
+}
 
 async function loadPeakSnaga() {
   try {

@@ -63,6 +63,24 @@ def init_db():
         )
     ''')
 
+    # Migracija: dodaj nove kolone u racuni (idempotentno)
+    racuni_cols_to_add = [
+        ('dug',             'REAL'),
+        ('pretplata',       'REAL'),
+        ('mjerna_mjernina', 'REAL'),
+        ('kamata',          'REAL'),
+        ('datum_racuna',    'TEXT'),
+        ('datum_dospijeca', 'TEXT'),
+        ('model_tarife',    'TEXT'),
+        ('sifra_kupca',     'TEXT'),
+        ('broj_racuna',     'TEXT'),
+    ]
+    existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(racuni)").fetchall()}
+    for col, typ in racuni_cols_to_add:
+        if col not in existing_cols:
+            conn.execute(f'ALTER TABLE racuni ADD COLUMN {col} {typ}')
+            log.info(f'Migracija: dodana racuni.{col}')
+
     count = conn.execute('SELECT COUNT(*) FROM korisnici').fetchone()[0]
     if count == 0:
         initial_pw = os.environ.get('INITIAL_ADMIN_PASSWORD', 'admin')

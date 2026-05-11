@@ -28,14 +28,23 @@ def api_racuni():
             d = request.get_json() or {}
             conn.execute('''
                 INSERT OR REPLACE INTO racuni
-                    (period, iznos, kwh_plus, kwh_minus, kwh_vt, kwh_nt, opskrba, mreza, pdv, napomena)
-                VALUES (?,?,?,?,?,?,?,?,?,?)
+                    (period, iznos, kwh_plus, kwh_minus, kwh_vt, kwh_nt,
+                     opskrba, mreza, pdv, napomena,
+                     dug, pretplata, mjerna_mjernina, kamata,
+                     datum_racuna, datum_dospijeca, model_tarife,
+                     sifra_kupca, broj_racuna)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ''', (
                 d['period'], d['iznos'],
-                d.get('kwh_plus'), d.get('kwh_minus'),
-                d.get('kwh_vt'),   d.get('kwh_nt'),
-                d.get('opskrba'),  d.get('mreza'), d.get('pdv'),
+                d.get('kwh_plus'),    d.get('kwh_minus'),
+                d.get('kwh_vt'),      d.get('kwh_nt'),
+                d.get('opskrba'),     d.get('mreza'),  d.get('pdv'),
                 d.get('napomena', ''),
+                d.get('dug'),         d.get('pretplata'),
+                d.get('mjerna_mjernina'), d.get('kamata'),
+                d.get('datum_racuna'),  d.get('datum_dospijeca'),
+                d.get('model_tarife'),
+                d.get('sifra_kupca'),   d.get('broj_racuna'),
             ))
             conn.commit()
             return jsonify({'ok': True})
@@ -45,6 +54,54 @@ def api_racuni():
             conn.execute('DELETE FROM racuni WHERE period=?', (period,))
             conn.commit()
         return jsonify({'ok': True})
+    finally:
+        conn.close()
+
+
+@bp.route('/racuni/stanje')
+def api_racuni_stanje():
+    """Stanje HEP računa: zadnji račun, dug, datum dospijeća, pretplate.
+
+    Vraća podatke iz zadnjeg uvezenog računa + tariff fixne troškove iz HEP_TARIFA.
+    """
+    from ..tariff import HEP_TARIFA
+    conn = get_db()
+    try:
+        row = conn.execute('''
+            SELECT * FROM racuni
+            WHERE iznos IS NOT NULL
+            ORDER BY datum_racuna DESC, period DESC
+            LIMIT 1
+        ''').fetchone()
+        if not row:
+            return jsonify({
+                'has_data': False,
+                'mjesecna_pretplata': round(HEP_TARIFA['opskrbna_mj'] + HEP_TARIFA['mjerna_mj'], 2),
+                'pretplata_opskrba': HEP_TARIFA['opskrbna_mj'],
+                'pretplata_mjerna':  HEP_TARIFA['mjerna_mj'],
+            })
+        r = dict(row)
+        pret = (r.get('pretplata') or HEP_TARIFA['opskrbna_mj']) + \
+               (r.get('mjerna_mjernina') or HEP_TARIFA['mjerna_mj'])
+        return jsonify({
+            'has_data':           True,
+            'period':             r.get('period'),
+            'datum_racuna':       r.get('datum_racuna'),
+            'datum_dospijeca':    r.get('datum_dospijeca'),
+            'iznos':              r.get('iznos'),
+            'dug':                r.get('dug'),
+            'kamata':             r.get('kamata'),
+            'model_tarife':       r.get('model_tarife'),
+            'broj_racuna':        r.get('broj_racuna'),
+            'sifra_kupca':        r.get('sifra_kupca'),
+            'pretplata_opskrba':  r.get('pretplata') or HEP_TARIFA['opskrbna_mj'],
+            'pretplata_mjerna':   r.get('mjerna_mjernina') or HEP_TARIFA['mjerna_mj'],
+            'mjesecna_pretplata': round(pret, 2),
+            'kwh_plus':           r.get('kwh_plus'),
+            'kwh_minus':          r.get('kwh_minus'),
+            'kwh_vt':             r.get('kwh_vt'),
+            'kwh_nt':             r.get('kwh_nt'),
+        })
     finally:
         conn.close()
 
