@@ -19,6 +19,13 @@ koje se sumiraju, npr. dva invertera):
     HA_ENT_CONS_KWH_DAY          — consumption today
     HA_ENT_GRID_KWH_DAY          — grid consumption today
 
+    # Lifetime counter (kWh ili Wh) — ako fale dnevni senzori, izračunavamo
+    # delta = current - vrijednost u 00:00 preko /api/history/period
+    HA_ENT_PV_KWH_LIFETIME       — lifetime PV kWh (može biti lista)
+    HA_ENT_FEED_KWH_LIFETIME     — lifetime feed-in kWh
+    HA_ENT_GRID_KWH_LIFETIME     — lifetime grid consumption kWh
+    HA_ENT_CONS_KWH_LIFETIME     — lifetime total consumption kWh
+
 Auto-detektira unit (W vs kW, Wh vs kWh) i normalizira na W / kWh.
 """
 
@@ -84,6 +91,67 @@ def _normalize_energy(value, unit: str) -> float:
     if u == 'mwh':
         return value * 1000
     return value  # kWh
+
+
+def _midnight_state(ha_url: str, token: str, entity_id: str):
+    """Vrati (value, unit) vrijednosti senzora u 00:00 danas (UTC).
+
+    HA history endpoint: GET /api/history/period/{start}?filter_entity_id=X
+    Vraća listu intervala — prvi state je vrijednost na start vremenu.
+    """
+    if not entity_id:
+        return None, None
+    # UTC ponoć danas — HA očekuje ISO 8601 s timezone offsetom
+    today_midnight = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+    url = f"{ha_url.rstrip('/')}/api/history/period/{today_midnight}"
+    try:
+        r = requests.get(
+            url,
+            headers={'Authorization': f'Bearer {token}'},
+            params={'filter_entity_id': entity_id, 'minimal_response': 'true'},
+            timeout=15,
+            verify=False,
+        )
+        if r.status_code != 200:
+            log.warning('HA history %s: HTTP %s', entity_id, r.status_code)
+            return None, None
+        data = r.json()
+        if not data or not data[0]:
+            return None, None
+        first = data[0][0]
+        s = first.get('state')
+        if s in (None, 'unknown', 'unavailable', ''):
+            return None, None
+        unit = (first.get('attributes', {}) or {}).get('unit_of_measurement', '')
+        try:
+            return float(s), unit
+        except ValueError:
+            return None, unit
+    except Exception as e:
+        log.warning('HA history %s: %s', entity_id, e)
+        return None, None
+
+
+def _today_delta(ha_url: str, token: str, entity_csv: str) -> float:
+    """Izračunaj današnji prirast (kWh) iz lifetime kumulativnog brojača.
+
+    Za svaki entity: current - midnight, normalizirano na kWh. Zbroji.
+    """
+    if not entity_csv:
+        return None
+    total = None
+    for eid in entity_csv.split(','):
+        eid = eid.strip()
+        if not eid:
+            continue
+        now_v, now_u = _get_state(ha_url, token, eid)
+        mid_v, mid_u = _midnight_state(ha_url, token, eid)
+        if now_v is None or mid_v is None:
+            continue
+        delta = now_v - mid_v
+        delta_kwh = _normalize_energy(delta, now_u or mid_u)
+        total = (total or 0) + delta_kwh
+    return total
 
 
 def _sum_entities(ha_url: str, token: str, entity_csv: str, energy: bool = False) -> float:
@@ -156,6 +224,16 @@ def pull_today():
     feed_kwh = _sum_entities(ha_url, token, os.environ.get('HA_ENT_FEED_KWH_DAY'), energy=True)
     cons_kwh = _sum_entities(ha_url, token, os.environ.get('HA_ENT_CONS_KWH_DAY'), energy=True)
     grid_kwh = _sum_entities(ha_url, token, os.environ.get('HA_ENT_GRID_KWH_DAY'), energy=True)
+
+    # Fallback: lifetime counter → izračunaj današnji delta iz history API-ja
+    if pv_kwh is None:
+        pv_kwh = _today_delta(ha_url, token, os.environ.get('HA_ENT_PV_KWH_LIFETIME'))
+    if feed_kwh is None:
+        feed_kwh = _today_delta(ha_url, token, os.environ.get('HA_ENT_FEED_KWH_LIFETIME'))
+    if grid_kwh is None:
+        grid_kwh = _today_delta(ha_url, token, os.environ.get('HA_ENT_GRID_KWH_LIFETIME'))
+    if cons_kwh is None:
+        cons_kwh = _today_delta(ha_url, token, os.environ.get('HA_ENT_CONS_KWH_LIFETIME'))
 
     if cons_kwh is None and pv_kwh is not None and feed_kwh is not None and grid_kwh is not None:
         cons_kwh = max(0, pv_kwh - feed_kwh + grid_kwh)
