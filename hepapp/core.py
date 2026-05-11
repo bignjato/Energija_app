@@ -106,13 +106,13 @@ def register_before_request(app):
 
     @app.before_request
     def _check():
-        from .auth import LOGIN_PAGE
+        from .auth import get_login_page
         if request.path in FREE_PATHS or request.path.startswith('/static/'):
             return None
         if not session.get('logged_in'):
             if request.path.startswith('/api/'):
                 return jsonify({'error': 'Unauthorized'}), 401
-            return LOGIN_PAGE
+            return get_login_page()
 
         # First-run wizard: admin && !setup_complete → /setup
         if session.get('uloga') == 'admin':

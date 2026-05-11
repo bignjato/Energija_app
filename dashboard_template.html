@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Energetski Monitor — Ignjatović</title>
+<title>{{BRAND_NAME}}</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -168,20 +168,10 @@ tr:hover td { background: var(--surface2); }
 
 <div class="header">
   <div style="display:flex;align-items:center;gap:0">
-    <a href="https://infobot.hr" target="_blank" style="text-decoration:none;display:flex;align-items:center;gap:10px;padding-right:14px;border-right:1px solid var(--border)">
-      <div>
-        <div style="font-family:'IBM Plex Sans',sans-serif;font-weight:900;font-size:20px;letter-spacing:-0.5px;line-height:1"><span style="color:#00d4ff">INFO</span><span style="color:#e63329">BOT</span></div>
-        <div style="font-size:9px;color:var(--muted);line-height:1.4;margin-top:2px">💻 IT · 🏠 Pametne kuće · 🖨️ 3D print</div>
-      </div>
-    </a>
-    <div style="display:flex;flex-direction:column;gap:2px;padding:0 12px;border-right:1px solid var(--border);font-size:10px;font-family:var(--mono)">
-      <a href="https://infobot.hr" target="_blank" style="color:var(--accent);text-decoration:none">🌐 infobot.hr</a>
-      <a href="mailto:info@infobot.hr" style="color:var(--muted);text-decoration:none">✉ info@infobot.hr</a>
-      <a href="tel:+38591623446" style="color:var(--muted);text-decoration:none">📞 +385 91 6234446</a>
-    </div>
+    {{BRAND_CONTACT_HTML}}
     <div style="padding-left:12px">
-      <h1 style="font-size:14px;font-weight:700;color:var(--text);line-height:1.2">⚡ Energetski Monitor</h1>
-      <p style="font-size:10px;color:var(--muted);margin-top:2px">Boris Ignjatović · Lukavec · HEP ODS + SMA 30 kWp</p>
+      <h1 style="font-size:14px;font-weight:700;color:var(--text);line-height:1.2">⚡ {{BRAND_NAME}}</h1>
+      <p style="font-size:10px;color:var(--muted);margin-top:2px">{{BRAND_OWNER_LINE}}</p>
     </div>
   </div>
   <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
@@ -657,7 +647,7 @@ tr:hover td { background: var(--surface2); }
         <div class="form-row">
           <div class="fg"><label>Email / Korisnik</label><input id="cfg-hep-user" placeholder="vas@email.hr"></div>
           <div class="fg"><label>Lozinka</label><input type="password" id="cfg-hep-pass" placeholder="(ostavi prazno = ne mijenjaj)"></div>
-          <div class="fg"><label>Šifra mjernog mjesta</label><input id="cfg-hep-sifra" placeholder="0149216862"></div>
+          <div class="fg"><label>Šifra mjernog mjesta</label><input id="cfg-hep-sifra" placeholder="10-znamenkasta šifra"></div>
         </div>
       </div>
     </div>
@@ -1613,7 +1603,7 @@ async function loadPostavke(){
     `;
 
     document.getElementById('app-info').innerHTML=`
-      <div class="summary-item ok"><div class="label">URL</div><div class="value">energija.infobot.hr</div></div>
+      <div class="summary-item ok"><div class="label">URL</div><div class="value">${location.hostname}</div></div>
       <div class="summary-item ok"><div class="label">HEP ODS</div><div class="value">${cfg.HEP_USERNAME||'—'}</div></div>
       <div class="summary-item ${cfg.SMA_USERNAME?'ok':'skip'}"><div class="label">SMA</div><div class="value">${cfg.SMA_USERNAME||'Nije konfigurirano'}</div></div>
       <div class="summary-item ${cfg.HA_URL?'ok':'skip'}"><div class="label">Home Assistant</div><div class="value">${cfg.HA_URL||'Nije konfigurirano'}</div></div>

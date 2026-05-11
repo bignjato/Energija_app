@@ -1,165 +1,146 @@
-# ⚡ Energija App — HEP Energy Monitor
+# HEP Energy Monitor
 
-> Energetski monitor za HEP ODS kupce sa solarnom elektranom (SMA inverteri)
-> 
-> Razvio: **[InfoBot](https://infobot.hr)** — Boris Ignjatović  
-> 💻 IT održavanje · 🏠 Pametne kuće · 🖨️ 3D printanje · ✉ boris@infobot.hr
+Open-source Flask dashboard za korisnike **HEP ODS-a** u Hrvatskoj. Scrape-a 15-minutna mjerenja s portala `mjerenje.hep.hr`, opcionalno integrira **SMA Sunny Portal** (solar) i **Home Assistant** (push senzora).
 
----
+Funkcionalnosti:
+- 📊 Dashboard s potrošnjom i predajom u mrežu (satno / dnevno / mjesečno)
+- 📄 Upload HEP PDF računa s automatskim parsiranjem (admin-only)
+- 💰 Procjena mjesečnog računa po stvarnim cijenama HEP-a + VT/NT slider
+- ⚡ Vršna snaga (kW) iz 15-min očitanja
+- 🎯 Auto-kalibracija VT/NT udjela iz vlastitih satnih podataka
+- ☀️ Integracija SMA Sunny Portal (PV inverter)
+- 🏠 Push senzora u Home Assistant
+- 🔒 Login + admin/viewer uloge, PBKDF2 hashing, CSRF, rate-limit, HTTPS-ready
 
-## 🚀 Brzi start
+## Brzi start (Docker)
+
+Treba ti Docker, Docker Compose, i HEP ODS pristup ([mjerenje.hep.hr](https://mjerenje.hep.hr)).
 
 ```bash
-git clone https://github.com/bignjato/Energija_app.git
+git clone git@github.com:bignjato/Energija_app.git
 cd Energija_app
 cp .env.example .env
-# Uredite .env s vašim podacima
-docker-compose up -d
+
+# Generiraj SECRET_KEY
+python3 -c "import secrets; print('SECRET_KEY=' + secrets.token_hex(32))" >> .env
+
+nano .env   # popuni HEP_USERNAME, HEP_PASSWORD, HEP_SIFRA
+
+docker compose up -d --build
 ```
 
-Otvorite **http://localhost:5000**
+Otvori http://localhost:5000 → prvi login `admin / admin` (ili vrijednost iz `INITIAL_ADMIN_PASSWORD`) → **Setup wizard** vodi te kroz konfiguraciju → promijeni admin lozinku u Postavkama.
 
-**Prva prijava:** `admin` / `admin`  
-⚠️ Promijenite lozinku u Postavke → Korisnici!
+## Arhitektura
 
----
+Dva Docker servisa iz iste slike:
 
-## ✨ Značajke
+| Servis | Komanda | Uloga |
+|---|---|---|
+| `hep-web` | `gunicorn app:app` | Flask web/API na :5000 |
+| `hep-sync` | `sh /app/sync_loop.sh` | Scraper petlja (5min ciklus) |
 
-| Značajka | Opis |
-|----------|------|
-| 📊 **Live dashboard** | Trenutna solarna snaga, potrošnja, autarkija |
-| 🏭 **HEP ODS** | Automatski import 15-min mjernih podataka |
-| ☀️ **SMA Sunny Portal** | History import (Tripower, Home Manager) |
-| 🏠 **Home Assistant** | Automatsko slanje senzora u HA Energy |
-| 💰 **Financijska analiza** | Procjena računa, projekcija do kraja mj. |
-| 📈 **Optimalno vrijeme** | Analiza kada je najpovoljnije trošiti struju |
-| 📋 **Upravljanje računima** | Unos stvarnih HEP računa i usporedba |
-| 🔄 **Usporedba perioda** | Usporedba dva proizvoljna perioda |
-| 🌙 **Dark/Light mode** | Prilagodba sučelja |
-| 🔒 **Višekorisnički pristup** | Admin i Viewer uloge s hashiranim lozinkama |
-| 💾 **Backup baze** | Automatski dnevni backup + ručni download |
+Volume `hep-data` mountan na `/data` (SQLite + dnevni backupi).
 
----
-
-## 📋 Preduvjeti
-
-- **Docker** i **Docker Compose**
-- **HEP ODS** korisnički račun (mjerenja.hep.hr)
-- **SMA Sunny Portal / Ennexos** račun *(opcionalno)*
-- **Home Assistant** 2023.x+ *(opcionalno)*
-
----
-
-## ⚙️ Konfiguracija
-
-Kopirajte `.env.example` u `.env` i popunite:
-
-```env
-# HEP ODS — obavezno
-HEP_USERNAME=vas@email.hr
-HEP_PASSWORD=vasa_lozinka
-HEP_SIFRA=vasa_sifra_mjernog_mjesta
-
-# SMA Sunny Portal — opcionalno
-SMA_USERNAME=vas@email.hr
-SMA_PASSWORD=vasa_lozinka
-SMA_PLANT_ID=
-SMA_INV1_ID=
-SMA_INV2_ID=
-
-# Home Assistant — opcionalno
-HA_URL=https://homeassistant.local:8123
-HA_TOKEN=eyJ...
-```
-
-Ili koristite **Setup Wizard** na `/setup` pri prvom pokretanju.
-
-Konfiguracija se čuva u SQLite bazi — `.env` je samo za inicijalizaciju.
-
----
-
-## 🏗️ Arhitektura
+### Struktura kôda
 
 ```
-Energija_app/
-├── app.py                  # Flask server + svi API endpointi
-├── hep_scraper.py          # HEP ODS scraper (JWT auth)
-├── sma_scraper.py          # SMA live podaci (svakih 5 min)
-├── sma_history_import.py   # SMA history import (Max aggregate)
-├── ha_sender.py            # Home Assistant sender
-├── sync_loop.sh            # Orchestrator (5min/1h/24h raspored)
-├── dashboard_template.html # Frontend dashboard (vanilla JS)
-├── docker-compose.yml
-├── Dockerfile
-├── requirements.txt
-└── .env.example
+hepapp/
+├── __init__.py        — Flask app factory
+├── core.py            — auth decorators, password hashing, CSRF, rate-limit
+├── db.py              — SQLite, init, WAL mode
+├── tariff.py          — HEP tarife, izračun računa
+├── auth.py            — login/logout (BRAND_* env)
+├── bill_parser.py     — HEP PDF parser (pdfplumber + regex)
+└── blueprints/
+    ├── views.py       — / + /health
+    ├── data.py        — /api/data, povijest, sma/live
+    ├── stats.py       — /api/stats/* (peak, kalibracija, VT/NT trošak)
+    ├── tarifa.py      — /api/tarifa
+    ├── racuni.py      — /api/racuni + PDF upload
+    ├── postavke.py    — /api/postavke + korisnici + backup
+    ├── setup.py       — /api/setup/* (manual scraper trigger)
+    └── wizard.py      — /setup (first-run wizard)
+
+hep_scraper.py         — HEP ODS scraper (15-min krivulje A+/A-)
+sma_scraper.py         — SMA Sunny Portal live scraper
+sma_history_import.py  — SMA history backfill
+ha_sender.py           — Home Assistant senzor push
+sync_loop.sh           — orkestracija (SMA 5min, HEP+HA 1h, history 24h)
+offsite_backup.sh      — opcionalan upload na rclone/rsync remote
 ```
 
----
+## Konfiguracija
 
-## 🔄 Sync raspored
+`.env` se učitava pri startu, kasnije se postavke (osim `SECRET_KEY`) mijenjaju kroz **Postavke** tab u UI-u (sprema se u SQLite + nazad u `.env`).
 
-| Što | Kada |
-|-----|------|
-| SMA live podaci | Svakih **5 minuta** |
-| HEP ODS podaci | Svakih **sat vremena** |
-| Home Assistant sync | Svakih **sat vremena** |
-| SMA history import | Jednom **dnevno** |
-| Backup baze | Jednom **dnevno** (zadnjih 7) |
+Ključne varijable:
+- `HEP_USERNAME` / `HEP_PASSWORD` / `HEP_SIFRA` — credentialsi za HEP ODS
+- `SECRET_KEY` — **OBAVEZNO**, 32+ char random hex
+- `INITIAL_ADMIN_PASSWORD` — lozinka prvog admin korisnika (default `admin`, promijeni je odmah)
+- `BRAND_NAME` / `BRAND_OWNER` / `BRAND_EMAIL` / `BRAND_PHONE` / `BRAND_WEB` — opcionalno, prikazuju se u header-u
+- `OFFSITE_BACKUP_MODE` / `OFFSITE_BACKUP_DEST` — off-site backup (vidi `ONEDRIVE_SETUP.md`)
 
----
+Sve ostalo: vidi `.env.example`.
 
-## 🛡️ Sigurnost
+## Nginx + TLS
 
-- Lozinke se čuvaju kao `salt:SHA256(salt:password)` — nije reverzibilno
-- Zadnji admin ne može se obrisati
-- Sve rute zaštićene loginom
-- `.env` i baza su **izvan Git repozitorija**
+`nginx-example.conf` ima primjer s Let's Encrypt SSL, HSTS i security headerima. Reverse proxy na `localhost:5000`. Prilagodi `server_name` i Let's Encrypt putanju za svoju domenu.
 
----
+## Off-site backup
 
-## 🚢 Deploy na produkciju
+Dnevni lokalni backup baze u `/data/backups/` (retencija 7). Za off-site (OneDrive / B2 / S3 / NAS) vidi `ONEDRIVE_SETUP.md` — postavi `OFFSITE_BACKUP_MODE=rclone` i konfiguriraj rclone remote.
 
-```bash
-# VPS s nginx + Let's Encrypt SSL
-apt install nginx certbot python3-certbot-nginx
-certbot --nginx -d vasa-domena.hr
+## API endpoint-i
 
-# Nginx reverse proxy na port 5000
-# Pogledajte nginx-hep.conf za primjer konfiguracije
-```
+| Method | Path | Auth |
+|---|---|---|
+| GET | `/health` | — |
+| GET | `/api/data` | login |
+| GET | `/api/data/sve` | login |
+| GET | `/api/povijest?od=YYYY-MM-DD&do=YYYY-MM-DD&res=day\|hour\|week` | login |
+| GET | `/api/sma/live` | login |
+| GET | `/api/stats/usporedba` | login |
+| GET | `/api/stats/optimalno` | login |
+| GET | `/api/stats/mjesecni` | login |
+| GET | `/api/stats/peak-snaga` | login |
+| GET | `/api/stats/vt-kalibracija?mjesec=YYYY-MM` | login |
+| GET | `/api/stats/vt-nt-trosak` | login |
+| GET/POST | `/api/tarifa` | login (POST: admin) |
+| GET/POST/DELETE | `/api/racuni` | login (POST/DELETE: admin) |
+| POST | `/api/racuni/upload-pdf` | admin |
+| GET/POST | `/api/postavke` | admin |
+| GET | `/api/postavke/status` | login |
+| GET | `/api/postavke/mjerno-mjesto` | login |
+| GET | `/api/postavke/backup` | admin |
+| GET/POST/DELETE | `/api/postavke/korisnici` | admin |
+| POST | `/api/setup/import-hep` (`?dani=N`) | admin |
+| POST | `/api/setup/import-sma` | admin |
+| POST | `/api/setup/sync-ha` | admin |
 
----
+## Sigurnost
 
-## 🤝 Kompatibilnost
+- PBKDF2-SHA256 password hashing (200k iter)
+- Session cookies: Secure, HttpOnly, SameSite=Lax
+- CSRF Origin check na POST/PUT/DELETE
+- Rate limit 10/min, 30/h na `/login` (flask-limiter)
+- HSTS + X-Frame-Options + X-Content-Type-Options + Referrer-Policy preko nginx-a
+- SQLite WAL mode + busy_timeout 5s
+- Non-root user (`app`) u kontejneru
 
-- **HEP ODS** — svi kupci s pametnim brojilom (mjerenja.hep.hr)
-- **SMA inverteri** — Sunny Tripower, Sunny Boy (Sunny Portal/Ennexos)
-- **SMA client_id** — `SPpbeOS` (reverse engineered, može se promijeniti)
-- **Home Assistant** — 2023.x i noviji
+Nedostaje: 2FA/TOTP, audit log, K8s deployment manifest.
 
----
+## Tehnologije
 
-## 📄 Licenca
+- Python 3.12, Flask 3.1, Gunicorn
+- SQLite (WAL mode)
+- pdfplumber za HEP PDF parsing
+- Chart.js za grafove
+- nginx za TLS termination
+- Docker / Docker Compose
 
-MIT License — slobodno koristite, modificirajte i distribuirajte.
+## License
 
----
+MIT — slobodno koristi i prilagodi.
 
-## 👨‍💻 Autor
-
-**InfoBot** — Obrt za informatičke i druge usluge  
-vl. Boris Ignjatović
-
-- 🌐 [infobot.hr](https://infobot.hr)
-- ✉️ info@infobot.hr
-- 📞 +385 91 6234446
-- 📍 Starogradska 14, 10412 Lukavec
-- 💻 IT održavanje
-- 🏠 Pametne kuće  
-- 🖨️ 3D printanje
-
----
-
-*Razvijeno za praćenje solarne elektrane 30 kWp + HEP ODS mjerač u Lukavcu, Hrvatska*
+Pull requesti dobrodošli. Ako trebaš pomoć s deployment-om, otvori issue.

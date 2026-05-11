@@ -59,7 +59,7 @@ button{padding:12px 22px;border:none;border-radius:8px;font-size:14px;font-weigh
       <div><label>Email</label><input id="hep_user" placeholder="vas@email.hr" autocomplete="username"></div>
       <div><label>Lozinka</label><input id="hep_pass" type="password" autocomplete="new-password"></div>
     </div>
-    <label>Šifra mjernog mjesta</label><input id="hep_sifra" placeholder="0149216862">
+    <label>Šifra mjernog mjesta</label><input id="hep_sifra" placeholder="10-znamenkasta šifra">
   </section>
 
   <section>
