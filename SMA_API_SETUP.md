@@ -1,95 +1,121 @@
 # SMA Monitoring API — setup
 
-Zamjena za Sunny Portal scrape s službenim REST API-jem. Stvarni 5-min podaci za današnji dan + povijesni.
+> **Napomena**: SMA NE nudi self-service registraciju. Client credentialse moraš
+> zatražiti **manualno** od SMA tima. Proces traje **nekoliko dana** dok ne
+> odobre. Ako trebaš brže rješenje, vidi `HA_PULL_SETUP.md` (čitanje preko
+> Home Assistant-a — radi instantno).
 
-## 1. Registracija na developer.sma.de
+Reference: https://developer.sma.de/api-access-control
 
-1. Idi na **https://developer.sma.de/sma-apis** i prijavi se SMA računom (isti kao Sunny Portal).
-2. Pod **My Apps** → **Register new application**:
-   - Name: `HEP Energy Monitor` (ili nešto svoje)
-   - Description: Personal home energy dashboard
-   - Redirect URI: `http://localhost:8080/callback` (privremeno, samo za OAuth flow)
-   - Scopes: `monitoring:read`
-3. Dobit ćeš **Client ID** + **Client Secret**. Spremi ih.
+## 1. Pripremi materijale za prijavu
 
-## 2. Autoriziraj svoju elektranu (OAuth flow — jednom)
+SMA ti šalje OAuth client_id/secret **samo nakon što im pošalješ**:
+- URL na logo aplikacije (`yourApp.com/assets/logo.png`)
+- URL na Terms of Service (`yourApp.com/serviceTerms`)
+- URL na Privacy Policy (`yourApp.com/dataPrivacy`)
+- **Redirect URI** za Code Grant Flow (npr. `https://energija.example.com/sma/callback`)
 
-SMA koristi Authorization Code grant. Trebaš dobiti **refresh_token** koji potom server koristi.
+Za hobi/personal projekte to možeš parkirati na svom GitHub Pages ili statickoj
+stranici. Logo treba postojati na javnom URL-u.
 
-### 2a. Browser flow (najlakše)
+## 2. Kontaktiraj SMA
 
-Otvori sljedeći URL u browseru (zamijeni `<CLIENT_ID>` svojim):
+Idi na **https://developer.sma.de/contact** i pošalji im upit:
+- Tip aplikacije: O&M / Backend monitoring
+- Opis use-case-a: Personal home energy dashboard
+- Linkovi iz koraka 1
+- Da li želiš Code Grant Flow ili Custom Flow (preporučujem **Code Grant** za
+  personal dashboard — jednostavnije)
 
+Pričekaj odgovor — može trajati dane do tjedana. Dobit ćeš:
+- **Client ID**
+- **Client Secret**
+
+## 3. OAuth Authorization Code Flow (jednom)
+
+Plant-owner (ti) mora autorizirati aplikaciju. To je 2-korak browser flow:
+
+### Step 1: Authorization request
+
+Otvori u browseru:
 ```
-https://auth.smaapis.de/oauth/authorize?response_type=code&client_id=<CLIENT_ID>&redirect_uri=http://localhost:8080/callback&scope=monitoring:read
+https://auth.smaapis.de/oauth2/auth?response_type=code&client_id=<CLIENT_ID>&redirect_uri=<REDIRECT_URI>&state=random123
 ```
 
-Prijaviš se SMA računom → odobriš pristup → preusmjeri te na `http://localhost:8080/callback?code=XXX`. **Kopiraj `code`** iz URL-a (samo treba 60s).
+Prijavi se SMA Sunny Portal računom → odobri pristup. Browser te preusmjeri na:
+```
+<REDIRECT_URI>?code=SplxlOBeZQQYbYS6WxSbIA&state=random123
+```
 
-### 2b. Zamijeni code za refresh_token
+**Kopiraj `code`** iz URL-a (vrijedi ~60 sekundi).
 
-Na Mac-u (treba `curl`):
+### Step 2: Exchange code for tokens
 
 ```bash
-curl -X POST https://auth.smaapis.de/oauth/token \
-  -u "<CLIENT_ID>:<CLIENT_SECRET>" \
+curl -X POST https://auth.smaapis.de/oauth2/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "client_id=<CLIENT_ID>" \
+  -d "client_secret=<CLIENT_SECRET>" \
   -d "grant_type=authorization_code" \
-  -d "code=<KOPIRANI_CODE>" \
-  -d "redirect_uri=http://localhost:8080/callback"
+  -d "code=<CODE_IZ_STEP_1>" \
+  -d "redirect_uri=<REDIRECT_URI>"
 ```
 
-Vraća JSON s `access_token` i `refresh_token`. **Spremi `refresh_token`** — taj traje dugotrajno.
+Odgovor:
+```json
+{
+  "access_token": "eyJ...",
+  "refresh_token": "abc...",
+  "expires_in": 3600
+}
+```
 
-## 3. Pronađi `plantId`
+**Spremi `refresh_token`** — taj traje dugotrajno, koristi se za auto-obnavljanje access tokena.
+
+## 4. Pronađi plant ID
 
 ```bash
 curl -H "Authorization: Bearer <ACCESS_TOKEN>" \
      https://monitoring.smaapis.de/v1/plants
 ```
 
-Vrati će listu — kopiraj `plantId` svoje elektrane.
+Vraća listu — kopiraj `plantId` svoje elektrane.
 
-## 4. Postavi `.env` na serveru
+## 5. Postavi `.env` na serveru
 
 ```bash
 ssh hep-vps
 nano /programi/hep_ha/.env
 ```
 
-Dodaj:
-
 ```
 SMA_USE_API=true
-SMA_API_CLIENT_ID=tvoj_client_id
-SMA_API_CLIENT_SECRET=tvoj_client_secret
-SMA_API_REFRESH_TOKEN=tvoj_refresh_token
-SMA_API_PLANT_ID=25056   # iz koraka 3
-# (opcionalno: SMA_API_BASE_URL, SMA_API_OAUTH_URL — defaulti su OK)
+SMA_API_CLIENT_ID=<od SMA>
+SMA_API_CLIENT_SECRET=<od SMA>
+SMA_API_REFRESH_TOKEN=<iz step 3>
+SMA_API_PLANT_ID=<iz step 4>
 ```
 
-## 5. Test
+## 6. Test
 
 ```bash
 docker compose restart hep-sync
 docker exec hep-energy-sync python /app/sma_api_scraper.py --only recent
 ```
 
-Trebao bi vidjeti retke poput:
+Trebao bi vidjeti:
 ```
 SMA: novi access_token (expires_in=3600s)
-Recent: spremio sma_live @ 2026-05-11T17:35:00 (PV=8542W feed=7100W)
+Recent: spremio sma_live @ 2026-05-11T17:35 (PV=8542W feed=7100W)
 ```
-
-## 6. Provjeri dashboard
-
-Reload `https://energija.infobot.hr` → Pregled tab → "DANAS — SMA" bi sad trebao imati ispravne brojke za sve (predaja, potrošnja kuće, iz mreže).
 
 ## Troubleshooting
 
-- **401 Unauthorized**: refresh_token istekao ili pogrešan. Ponovi korak 2.
-- **403 Forbidden**: plant owner nije autorizirao tvoju aplikaciju. Provjeri u Sunny Portal-u → Settings → Connected applications.
-- **Token rotacija**: ako vidiš "SMA: refresh_token rotiran" u logovima — kopiraj novi iz `docker logs hep-energy-sync` u `.env` i restartaj sync.
+- **401 Unauthorized**: refresh_token istekao. Ponovi korak 3.
+- **403 Forbidden**: plant owner nije autorizirao aplikaciju. Provjeri Sunny Portal → Settings → Connected applications.
+- **Token rotacija**: ako vidiš "SMA: refresh_token rotiran" u logovima — kopiraj novi iz `docker logs hep-energy-sync` u `.env` i restartaj.
+- **Sandbox**: za testiranje prije produkcijskih credentialsa, koristi `SMA_API_BASE_URL=https://sandbox.smaapis.de/monitoring` + `SMA_API_TOKEN_URL=https://sandbox-auth.smaapis.de/oauth2/token`. SMA Sandbox accounts: `apiTestUser@apiSandbox.com / MyPass123!`.
 
-## Stari scraper
+## Stari Sunny Portal scraper
 
-`sma_scraper.py` (Sunny Portal scrape) ostaje na serveru kao fallback. Ako se vratiš na njega, postavi `SMA_USE_API=false` ili obriši taj redak iz `.env`.
+Ako `SMA_USE_API=false` (default), koristi se `sma_scraper.py` (legacy Sunny Portal scrape).

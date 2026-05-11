@@ -25,9 +25,15 @@ run() {
     "$@" 2>&1 | stamp | tee -a "$LOG"
 }
 
-# Birač SMA scrapera: novi službeni API ili stari Sunny Portal scrape
+# Birač SMA izvora podataka (po prioritetu):
+#   1. SMA_USE_HA_PULL=true → čita iz Home Assistant-a (brzo, lokalno)
+#   2. SMA_USE_API=true     → službeni SMA Monitoring API
+#   3. fallback              → stari Sunny Portal scrape
 sma_recent() {
-    if [ "${SMA_USE_API:-false}" = "true" ]; then
+    if [ "${SMA_USE_HA_PULL:-false}" = "true" ]; then
+        run python -m hepapp.ha_puller --only recent
+        run python -m hepapp.ha_puller --only today
+    elif [ "${SMA_USE_API:-false}" = "true" ]; then
         run python /app/sma_api_scraper.py --only recent
         run python /app/sma_api_scraper.py --only day
     else

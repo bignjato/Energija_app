@@ -1,16 +1,22 @@
 """SMA Monitoring API client (developer.sma.de).
 
 Officijelni API umjesto scrapinga Sunny Portala. Daje EnergyBalance s
-5-min rezolucijom za današnji dan + povijest. Auth: OAuth2 Bearer token
-(client_credentials grant ili korisnik dostavlja refresh_token).
+5-min rezolucijom za današnji dan + povijest. Auth: OAuth2 (Authorization
+Code Grant + refresh_token).
+
+NAPOMENA: SMA ne nudi self-service registraciju. Client credentialse moraš
+zatražiti direktno od SMA — pošalji kontakt formu s logo/ToS/privacy/redirect
+URL-ovima na https://developer.sma.de/contact. Vidi SMA_API_SETUP.md za korake.
 
 Konfiguracija (env vars):
     SMA_API_BASE_URL       — default https://monitoring.smaapis.de
-    SMA_API_OAUTH_URL      — default https://auth.smaapis.de/oauth/token
-    SMA_API_CLIENT_ID      — registriran na developer.sma.de
-    SMA_API_CLIENT_SECRET  — registriran na developer.sma.de
-    SMA_API_REFRESH_TOKEN  — od plant-owner autorizacijskog flow-a
-    SMA_API_PLANT_ID       — ID elektrane (npr. 25056)
+                             (sandbox: https://sandbox.smaapis.de/monitoring)
+    SMA_API_TOKEN_URL      — default https://auth.smaapis.de/oauth2/token
+                             (sandbox: https://sandbox-auth.smaapis.de/oauth2/token)
+    SMA_API_CLIENT_ID      — od SMA (manualno via kontakt forma)
+    SMA_API_CLIENT_SECRET  — od SMA
+    SMA_API_REFRESH_TOKEN  — od plant-owner autorizacije (Code Grant Step 2)
+    SMA_API_PLANT_ID       — ID elektrane (iz GET /v1/plants)
 
 Endpointi koje koristimo:
     GET /v1/plants
@@ -39,7 +45,7 @@ class SmaApiClient:
         oauth_url: Optional[str] = None,
     ):
         self.base_url      = (base_url or os.environ.get('SMA_API_BASE_URL', 'https://monitoring.smaapis.de')).rstrip('/')
-        self.oauth_url     = oauth_url or os.environ.get('SMA_API_OAUTH_URL', 'https://auth.smaapis.de/oauth/token')
+        self.oauth_url     = oauth_url or os.environ.get('SMA_API_TOKEN_URL', 'https://auth.smaapis.de/oauth2/token')
         self.client_id     = client_id or os.environ.get('SMA_API_CLIENT_ID', '')
         self.client_secret = client_secret or os.environ.get('SMA_API_CLIENT_SECRET', '')
         self.refresh_token = refresh_token or os.environ.get('SMA_API_REFRESH_TOKEN', '')
