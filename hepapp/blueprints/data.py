@@ -4,9 +4,36 @@ from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
 
-from ..db import get_db
+from ..db import get_db, get_config
+from ..tariff import HEP_TARIFA, get_vt_udio
 
 bp = Blueprint('data', __name__, url_prefix='/api')
+
+
+def _efektivne_cijene() -> dict:
+    """Izračunaj prosječnu cijenu kupnje/prodaje iz HEP_TARIFA + VT udio.
+
+    Koristi se u UI-u Financije za jednostavne projekcije.
+    """
+    t = HEP_TARIFA
+    vt_udio = get_vt_udio()
+    vt_full = (t['vt_opskrba'] + t['vt_distrib'] + t['vt_prijenos']
+               + t['solidarna'] + t['oie'])
+    nt_full = (t['nt_opskrba'] + t['nt_distrib'] + t['nt_prijenos']
+               + t['solidarna'] + t['oie'])
+    kupnja_avg = (vt_full * vt_udio + nt_full * (1 - vt_udio)) * (1 + t['pdv'])
+    # Detektira HEPI bijeli prema config-u TARIFA_MODEL ili default standardni
+    model = (get_config('TARIFA_MODEL', 'standardni') or 'standardni').lower()
+    if 'bijeli' in model:
+        prodaja = t['vt_otkup'] * vt_udio + t['nt_otkup'] * (1 - vt_udio)
+    else:
+        prodaja = t['otkup']
+    return {
+        'kupnja_avg':  round(kupnja_avg, 6),
+        'prodaja':     round(prodaja, 6),
+        'vt_udio':     round(vt_udio * 100, 1),
+        'model':       'bijeli' if 'bijeli' in model else 'standardni',
+    }
 
 
 @bp.route('/data')
@@ -75,6 +102,7 @@ def api_data():
             'sma_dnevna': list(reversed(sma_dnevna)),
             'sma_satna':  list(reversed(sma_satna)),
             'tarifa':     tarifa,
+            'efektivne_cijene': _efektivne_cijene(),
             'ts':         datetime.now().isoformat(),
         })
     finally:

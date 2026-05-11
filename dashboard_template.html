@@ -327,17 +327,31 @@ tr:hover td { background: var(--surface2); }
 <!-- ============ FINANCIJE ============ -->
 <div id="page-financije" class="page"><div class="wrap">
 
-  <div class="form-section">
-    <h3>⚙️ Tarifa</h3>
-    <div class="form-row">
-      <div class="fg"><label>Naziv tarife</label><input id="fNaz" value="HEP standardna"></div>
-      <div class="fg"><label>Kupnja (€/kWh)</label><input id="fKup" type="number" step="0.001" value="0.12"></div>
-      <div class="fg"><label>Prodaja (€/kWh)</label><input id="fPro" type="number" step="0.001" value="0.065"></div>
-      <div class="fg"><label>VT od (sat)</label><input id="fVtOd" type="number" min="0" max="23" value="7"></div>
-      <div class="fg"><label>VT do (sat)</label><input id="fVtDo" type="number" min="0" max="23" value="21"></div>
+  <!-- Cijene info (read-only — uređuje se u Postavkama) -->
+  <div class="form-section" style="margin-bottom:14px">
+    <h3>⚡ Aktivne tarife</h3>
+    <div style="font-size:13px;color:var(--muted);margin-bottom:10px">
+      Cijene i tarifni model dolaze iz HEP-a + tvojih postavki. Za promjene idi u
+      <a href="#" onclick="event.preventDefault();goTo('postavke',document.querySelectorAll('.tab')[6])" style="color:var(--accent)">Postavke → Tarifa</a>.
     </div>
-    <button class="btn btn-primary" onclick="saveTarifa()">Spremi tarifu</button>
-    <span id="fStatus" style="margin-left:12px;font-size:12px;color:var(--muted)"></span>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px" id="cijene-info">
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Prosj. kupnja</div>
+        <div style="font-size:18px;color:#f87171;font-family:var(--mono)" id="ci-kup">— c/kWh</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Prodaja (otkup)</div>
+        <div style="font-size:18px;color:#22c55e;font-family:var(--mono)" id="ci-pro">— c/kWh</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">VT udio</div>
+        <div style="font-size:18px;color:#22d3ee;font-family:var(--mono)" id="ci-vt">—</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Model</div>
+        <div style="font-size:18px;color:var(--text);font-family:var(--mono)" id="ci-model">—</div>
+      </div>
+    </div>
   </div>
 
   <!-- Stanje HEP računa -->
@@ -1076,21 +1090,20 @@ function renderUsporedbaPeriod() {
 // ---- FINANCIJE ----
 function renderFin(){
   if(!D)return;
-  const t=D.tarifa;
-  if(t){
-    document.getElementById('fNaz').value=t.naziv;
-    document.getElementById('fKup').value=t.cijena_kupnja;
-    document.getElementById('fPro').value=t.cijena_prodaja;
-    document.getElementById('fVtOd').value=t.vt_pocetak;
-    document.getElementById('fVtDo').value=t.vt_kraj;
-  }
+  // Cijene info kartice
+  const ec = D.efektivne_cijene || {kupnja_avg:0.17, prodaja:0.065, vt_udio:45, model:'standardni'};
+  set('ci-kup',   (ec.kupnja_avg*100).toFixed(2)+' c/kWh');
+  set('ci-pro',   (ec.prodaja*100).toFixed(2)+' c/kWh');
+  set('ci-vt',    ec.vt_udio+'%');
+  set('ci-model', ec.model === 'bijeli' ? 'HEPI bijeli' : 'Standardni');
   calcFin();
 }
 
 function calcFin(){
   if(!D)return;
-  const cp=+document.getElementById('fKup').value||0.12;
-  const cs=+document.getElementById('fPro').value||0.065;
+  const ec = D.efektivne_cijene || {kupnja_avg:0.17, prodaja:0.065};
+  const cp = ec.kupnja_avg;
+  const cs = ec.prodaja;
   const ms=mS(),ys=yS();
   const mjH=D.dnevna.filter(r=>r.datum>=ms),godH=D.dnevna.filter(r=>r.datum>=ys);
   const mjS=D.sma_dnevna.filter(r=>r.datum>=ms);
@@ -1161,12 +1174,7 @@ function calcFin(){
   ],'€');
 }
 
-async function saveTarifa(){
-  const data={naziv:document.getElementById('fNaz').value,cijena_kupnja:document.getElementById('fKup').value,cijena_prodaja:document.getElementById('fPro').value,vt_pocetak:document.getElementById('fVtOd').value,vt_kraj:document.getElementById('fVtDo').value};
-  await fetch('/api/tarifa',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
-  showToast('Tarifa spremljena!');
-  await load(); renderFin();
-}
+// saveTarifa: maknuto — tarifa se sad uređuje u Postavkama (VT/NT slider + .env)
 
 // ---- RAČUNI ----
 async function loadRacuni(){
