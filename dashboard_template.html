@@ -220,12 +220,21 @@ tr:hover td { background: var(--surface2); }
       </div>
     </div>
     <div class="card">
-      <div class="card-title">📅 Danas — zbirno</div>
+      <div class="card-title">📅 Danas — SMA <span style="font-size:11px;color:var(--muted);font-weight:400">(live, real-time)</span></div>
+      <div class="flow4">
+        <div class="fl"><div class="fl-lbl">Solar proizvodnja</div><div class="fl-val c-solar" id="d-sma-p">—</div><div class="fl-unit">kWh</div></div>
+        <div class="fl"><div class="fl-lbl">Predaja</div><div class="fl-val c-feed" id="d-sma-fee">—</div><div class="fl-unit">kWh</div></div>
+        <div class="fl"><div class="fl-lbl">Potrošnja kuće</div><div class="fl-val c-consume" id="d-sma-con">—</div><div class="fl-unit">kWh</div></div>
+        <div class="fl"><div class="fl-lbl">Iz mreže</div><div class="fl-val c-grid" id="d-sma-grd">—</div><div class="fl-unit">kWh</div></div>
+      </div>
+      <div class="card-title" style="margin-top:14px;display:flex;align-items:center;gap:8px">
+        🏭 <span>HEP <span id="d-hep-lbl" style="font-size:11px;color:var(--muted);font-weight:400">(zadnji dan u bazi)</span></span>
+      </div>
       <div class="flow4">
         <div class="fl"><div class="fl-lbl">HEP potrošnja</div><div class="fl-val c-consume" id="d-hep-p">—</div><div class="fl-unit">kWh</div></div>
         <div class="fl"><div class="fl-lbl">HEP predaja</div><div class="fl-val c-feed" id="d-hep-m">—</div><div class="fl-unit">kWh</div></div>
-        <div class="fl"><div class="fl-lbl">SMA solar</div><div class="fl-val c-solar" id="d-sma-p">—</div><div class="fl-unit">kWh</div></div>
-        <div class="fl"><div class="fl-lbl">Neto bilanca</div><div class="fl-val" id="d-neto">—</div><div class="fl-unit">kWh</div></div>
+        <div class="fl"><div class="fl-lbl">Neto HEP</div><div class="fl-val" id="d-hep-neto">—</div><div class="fl-unit">kWh</div></div>
+        <div class="fl"><div class="fl-lbl">Datum</div><div class="fl-val" style="font-size:18px" id="d-hep-datum">—</div><div class="fl-unit">HEP kasni 24h</div></div>
       </div>
     </div>
   </div>
@@ -275,21 +284,32 @@ tr:hover td { background: var(--surface2); }
 <!-- ============ USPOREDBA ============ -->
 <div id="page-usporedba" class="page"><div class="wrap">
 
+  <!-- Period selektor -->
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+    <span style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Period:</span>
+    <button class="btn btn-secondary btn-sm" data-period="day"   onclick="setUsporedbaPeriod('day',this)">Danas</button>
+    <button class="btn btn-secondary btn-sm" data-period="week"  onclick="setUsporedbaPeriod('week',this)">Tjedan</button>
+    <button class="btn btn-primary   btn-sm" data-period="month" onclick="setUsporedbaPeriod('month',this)">Mjesec</button>
+    <button class="btn btn-secondary btn-sm" data-period="year"  onclick="setUsporedbaPeriod('year',this)">Godina</button>
+    <button class="btn btn-secondary btn-sm" data-period="all"   onclick="setUsporedbaPeriod('all',this)">Sve</button>
+    <span style="margin-left:14px;font-size:12px;color:var(--muted)" id="u-period-info"></span>
+  </div>
+
   <div class="g-auto">
-    <div class="kpi solar"><div class="kpi-lbl">HEP predaja ↔ SMA predaja</div><div class="kpi-val" id="u-pred-d">—</div><div class="kpi-sub">razlika kWh · 30 dana</div></div>
-    <div class="kpi cons"><div class="kpi-lbl">HEP potrošnja ↔ SMA mreža</div><div class="kpi-val" id="u-pot-d">—</div><div class="kpi-sub">razlika kWh · 30 dana</div></div>
-    <div class="kpi grn"><div class="kpi-lbl">Ukupna solar · 30 dana</div><div class="kpi-val" id="u-sol-t">—</div><div class="kpi-sub">kWh po SMA</div></div>
-    <div class="kpi acc"><div class="kpi-lbl">Prosj. autarkija · 30 dana</div><div class="kpi-val" id="u-aut">—</div><div class="kpi-sub">%</div></div>
+    <div class="kpi solar"><div class="kpi-lbl">HEP predaja ↔ SMA predaja</div><div class="kpi-val" id="u-pred-d">—</div><div class="kpi-sub" id="u-pred-lbl">razlika kWh</div></div>
+    <div class="kpi cons"><div class="kpi-lbl">HEP potrošnja ↔ SMA mreža</div><div class="kpi-val" id="u-pot-d">—</div><div class="kpi-sub" id="u-pot-lbl">razlika kWh</div></div>
+    <div class="kpi grn"><div class="kpi-lbl">Ukupna solar</div><div class="kpi-val" id="u-sol-t">—</div><div class="kpi-sub" id="u-sol-lbl">kWh po SMA</div></div>
+    <div class="kpi acc"><div class="kpi-lbl">Prosj. autarkija</div><div class="kpi-val" id="u-aut">—</div><div class="kpi-sub">%</div></div>
   </div>
 
   <div class="cc">
-    <h3>Usporedba HEP vs SMA — zadnjih 60 dana</h3>
+    <h3 id="u-chart-title">Usporedba HEP vs SMA — ovaj mjesec</h3>
     <div class="sub">HEP mjerač vs SMA Home Manager · dnevni podaci</div>
     <div class="cw h300"><canvas id="cUsporedba"></canvas></div>
   </div>
 
   <div class="card">
-    <div class="card-title">Tablica usporedbe — zadnjih 30 dana</div>
+    <div class="card-title" id="u-table-title">Tablica usporedbe — ovaj mjesec</div>
     <div class="tbl-wrap">
       <table>
         <thead><tr>
@@ -892,16 +912,35 @@ function renderPregled(){
     document.getElementById('lv-aut-bar').style.width=Math.min(100,a)+'%';
   }
 
-  const dH=D.dnevna.find(r=>r.datum===today());
+  // SMA — danas (live)
   const dS=D.sma_dnevna.find(r=>r.datum===today());
-  set('d-hep-p',dH?f1(dH.kwh_plus):'—');
-  set('d-hep-m',dH?f1(dH.kwh_minus):'—');
-  set('d-sma-p',dS?f1(dS.pv_generation_kwh):'—');
-  if(dH){
-    const n=(dH.kwh_minus||0)-(dH.kwh_plus||0);
-    const el=document.getElementById('d-neto');
-    el.textContent=(n>=0?'+':'')+f1(n);
-    el.className='fl-val '+(n>=0?'c-feed':'c-grid');
+  set('d-sma-p',  dS?f1(dS.pv_generation_kwh):'—');
+  set('d-sma-fee',dS?f1(dS.feed_in_kwh):'—');
+  set('d-sma-con',dS?f1(dS.total_consumption_kwh):'—');
+  set('d-sma-grd',dS?f1(dS.grid_consumption_kwh):'—');
+
+  // HEP — zadnji dan u bazi (može kasniti 24h)
+  const danas=today();
+  const hepRows = D.dnevna.filter(r => r.datum < danas || (r.kwh_plus||0) > 0 || (r.kwh_minus||0) > 0);
+  const dH = hepRows.length ? hepRows[hepRows.length-1] : null;
+  // prefer "danas" ako postoji s podacima, inače najnoviji raspoloživi
+  const dToday = D.dnevna.find(r=>r.datum===danas && ((r.kwh_plus||0)>0 || (r.kwh_minus||0)>0));
+  const hepShow = dToday || dH;
+  set('d-hep-p', hepShow?f1(hepShow.kwh_plus):'—');
+  set('d-hep-m', hepShow?f1(hepShow.kwh_minus):'—');
+  if (hepShow) {
+    const n=(hepShow.kwh_minus||0)-(hepShow.kwh_plus||0);
+    const el=document.getElementById('d-hep-neto');
+    if (el) {
+      el.textContent=(n>=0?'+':'')+f1(n);
+      el.className='fl-val '+(n>=0?'c-feed':'c-grid');
+    }
+    const dateEl = document.getElementById('d-hep-datum');
+    if (dateEl) dateEl.textContent = hepShow.datum;
+    const lbl = document.getElementById('d-hep-lbl');
+    if (lbl) {
+      lbl.textContent = hepShow.datum === danas ? '(danas, djelomično)' : '(' + hepShow.datum + ' — kasni)';
+    }
   }
 
   const ws=wkS(), l7=last7(), ms=mS();
@@ -946,40 +985,92 @@ async function renderUsporedba(){
     const r=await fetch('/api/stats/usporedba');
     const rows=await r.json();
     if(!Array.isArray(rows)||!rows.length)return;
-    const l30=rows.slice(-30);
-    const tHP=sumK(l30,'hep_predaja'),tSP=l30.reduce((a,b)=>a+(b.sma_predaja||0),0);
-    const tHK=sumK(l30,'hep_potrosnja'),tSK=l30.reduce((a,b)=>a+(b.sma_mreza||0),0);
-    const tSol=l30.reduce((a,b)=>a+(b.sma_proizvodnja||0),0);
-    const aAut=avgK(l30.filter(r=>r.autarky_rate),'autarky_rate')*100;
-    set('u-pred-d',sgn(tHP-tSP)+f1(tHP-tSP)+' kWh');
-    set('u-pot-d', sgn(tHK-tSK)+f1(tHK-tSK)+' kWh');
-    set('u-sol-t', f1(tSol)+' kWh');
-    set('u-aut',   f0(aAut)+'%');
-
-    const l60=rows.slice(-60);
-    mkChart('cUsporedba','line',l60.map(r=>r.datum.slice(5)),[
-      {label:'HEP potrošnja',data:l60.map(r=>r.hep_potrosnja||0),borderColor:'#a78bfa',pointRadius:0,borderWidth:2,tension:.3},
-      {label:'SMA mreža',data:l60.map(r=>r.sma_mreza||0),borderColor:'#f87171',pointRadius:0,borderWidth:1.5,tension:.3,borderDash:[4,2]},
-      {label:'HEP predaja',data:l60.map(r=>r.hep_predaja||0),borderColor:'#38bdf8',pointRadius:0,borderWidth:2,tension:.3},
-      {label:'SMA solar',data:l60.map(r=>r.sma_proizvodnja||0),borderColor:'#fbbf24',pointRadius:0,borderWidth:2,tension:.3},
-    ],'kWh');
-
-    const tb=document.getElementById('tUsporedba');
-    tb.innerHTML='';
-    l30.slice().reverse().forEach(row=>{
-      const dp=(row.hep_potrosnja||0)-(row.sma_mreza||0);
-      const dr=(row.hep_predaja||0)-(row.sma_predaja||0);
-      tb.innerHTML+=`<tr>
-        <td>${row.datum}</td>
-        <td class="c-consume">${f1(row.hep_potrosnja)}</td><td>${f1(row.sma_mreza)}</td>
-        <td class="${Math.abs(dp)>2?(dp>0?'neg':'pos'):'c-muted'}">${sgn(dp)+f1(dp)}</td>
-        <td class="c-feed">${f1(row.hep_predaja)}</td><td>${f1(row.sma_predaja)}</td>
-        <td class="${Math.abs(dr)>2?(dr>0?'neg':'pos'):'c-muted'}">${sgn(dr)+f1(dr)}</td>
-        <td class="c-solar">${f1(row.sma_proizvodnja)}</td>
-        <td>${row.autarky_rate?f0(row.autarky_rate*100)+'%':'—'}</td>
-      </tr>`;
-    });
+    window._usporedbaRows = rows;
+    renderUsporedbaPeriod();
   }catch(e){console.error(e);}
+}
+
+// Period filter za Usporedba tab
+window._usporedbaPeriod = window._usporedbaPeriod || 'month';
+
+function _periodRange(period) {
+  const danas = new Date(today());
+  const y = danas.getFullYear(), m = danas.getMonth();
+  let od, do_, label;
+  if (period === 'day')   { od = today(); do_ = today(); label = 'danas'; }
+  else if (period === 'week') {
+    const d = new Date(danas);
+    const dow = (d.getDay() + 6) % 7;   // ponedjeljak = 0
+    d.setDate(d.getDate() - dow);
+    od = d.toISOString().slice(0,10); do_ = today();
+    label = 'ovaj tjedan (od pon)';
+  }
+  else if (period === 'month') {
+    od = `${y}-${String(m+1).padStart(2,'0')}-01`;
+    do_ = today();
+    label = 'ovaj mjesec';
+  }
+  else if (period === 'year')  { od = `${y}-01-01`; do_ = today(); label = 'ova godina'; }
+  else                          { od = '1900-01-01'; do_ = today(); label = 'sve raspoloživo'; }
+  return { od, do_, label };
+}
+
+function setUsporedbaPeriod(period, btn) {
+  window._usporedbaPeriod = period;
+  document.querySelectorAll('[data-period]').forEach(b => {
+    b.classList.remove('btn-primary');
+    b.classList.add('btn-secondary');
+  });
+  if (btn) { btn.classList.remove('btn-secondary'); btn.classList.add('btn-primary'); }
+  renderUsporedbaPeriod();
+}
+
+function renderUsporedbaPeriod() {
+  const rows = window._usporedbaRows || [];
+  if (!rows.length) return;
+  const { od, do_, label } = _periodRange(window._usporedbaPeriod || 'month');
+  const filtered = rows.filter(r => r.datum >= od && r.datum <= do_);
+
+  document.getElementById('u-period-info').textContent =
+    `${od} → ${do_}  ·  ${filtered.length} dana`;
+  document.getElementById('u-chart-title').textContent = `Usporedba HEP vs SMA — ${label}`;
+  document.getElementById('u-table-title').textContent = `Tablica usporedbe — ${label}`;
+  ['u-pred-lbl','u-pot-lbl','u-sol-lbl'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = el.textContent.replace(/·.*$/, '').trim() + ' · ' + label;
+  });
+
+  const tHP=sumK(filtered,'hep_predaja'),tSP=filtered.reduce((a,b)=>a+(b.sma_predaja||0),0);
+  const tHK=sumK(filtered,'hep_potrosnja'),tSK=filtered.reduce((a,b)=>a+(b.sma_mreza||0),0);
+  const tSol=filtered.reduce((a,b)=>a+(b.sma_proizvodnja||0),0);
+  const aAut=avgK(filtered.filter(r=>r.autarky_rate),'autarky_rate')*100;
+  set('u-pred-d',sgn(tHP-tSP)+f1(tHP-tSP)+' kWh');
+  set('u-pot-d', sgn(tHK-tSK)+f1(tHK-tSK)+' kWh');
+  set('u-sol-t', f1(tSol)+' kWh');
+  set('u-aut',   f0(aAut)+'%');
+
+  mkChart('cUsporedba','line',filtered.map(r=>r.datum.slice(5)),[
+    {label:'HEP potrošnja',data:filtered.map(r=>r.hep_potrosnja||0),borderColor:'#a78bfa',pointRadius:0,borderWidth:2,tension:.3},
+    {label:'SMA mreža',data:filtered.map(r=>r.sma_mreza||0),borderColor:'#f87171',pointRadius:0,borderWidth:1.5,tension:.3,borderDash:[4,2]},
+    {label:'HEP predaja',data:filtered.map(r=>r.hep_predaja||0),borderColor:'#38bdf8',pointRadius:0,borderWidth:2,tension:.3},
+    {label:'SMA solar',data:filtered.map(r=>r.sma_proizvodnja||0),borderColor:'#fbbf24',pointRadius:0,borderWidth:2,tension:.3},
+  ],'kWh');
+
+  const tb=document.getElementById('tUsporedba');
+  tb.innerHTML='';
+  filtered.slice().reverse().forEach(row=>{
+    const dp=(row.hep_potrosnja||0)-(row.sma_mreza||0);
+    const dr=(row.hep_predaja||0)-(row.sma_predaja||0);
+    tb.innerHTML+=`<tr>
+      <td>${row.datum}</td>
+      <td class="c-consume">${f1(row.hep_potrosnja)}</td><td>${f1(row.sma_mreza)}</td>
+      <td class="${Math.abs(dp)>2?(dp>0?'neg':'pos'):'c-muted'}">${sgn(dp)+f1(dp)}</td>
+      <td class="c-feed">${f1(row.hep_predaja)}</td><td>${f1(row.sma_predaja)}</td>
+      <td class="${Math.abs(dr)>2?(dr>0?'neg':'pos'):'c-muted'}">${sgn(dr)+f1(dr)}</td>
+      <td class="c-solar">${f1(row.sma_proizvodnja)}</td>
+      <td>${row.autarky_rate?f0(row.autarky_rate*100)+'%':'—'}</td>
+    </tr>`;
+  });
 }
 
 // ---- FINANCIJE ----
@@ -1861,7 +1952,36 @@ async function loadProcjenaTrenutni() {
       return;
     }
     const ukupno_proj = (d.racun_procjena + d.fiksne_naknade).toFixed(2);
+
+    // HEPI bijeli specific
+    let bijeli_html = '';
+    if (d.bijeli_procjena) {
+      const bp = d.bijeli_procjena;
+      const op = d.otkup_procjena;
+      const neto = (bp.iznos + d.fiksne_naknade - (op?.ukupno_eur || 0)).toFixed(2);
+      bijeli_html = `
+      <div style="background:var(--bg);border:1px solid #22d3ee44;border-radius:8px;padding:14px;margin-top:10px">
+        <div style="font-size:13px;color:#22d3ee;font-weight:600;margin-bottom:10px">⚡ HEPI bijeli — net-metering izračun</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;font-size:12px">
+          <div><div style="color:var(--muted);font-size:11px">Saldo VT</div><div style="font-family:var(--mono);color:${bp.saldo_vt>=0?'#f87171':'#22c55e'}">${bp.saldo_vt>=0?'+':''}${bp.saldo_vt} kWh</div></div>
+          <div><div style="color:var(--muted);font-size:11px">Saldo NT</div><div style="font-family:var(--mono);color:${bp.saldo_nt>=0?'#f87171':'#22c55e'}">${bp.saldo_nt>=0?'+':''}${bp.saldo_nt} kWh</div></div>
+          <div><div style="color:var(--muted);font-size:11px">Opskrba</div><div style="font-family:var(--mono)">${bp.opskrba} €</div></div>
+          <div><div style="color:var(--muted);font-size:11px">Mreža</div><div style="font-family:var(--mono)">${bp.mreza} €</div></div>
+          <div><div style="color:var(--muted);font-size:11px">PDV 13%</div><div style="font-family:var(--mono)">${bp.pdv} €</div></div>
+          <div><div style="color:var(--muted);font-size:11px">Račun (procjena)</div><div style="font-family:var(--mono);color:#fbbf24">${bp.iznos} €</div></div>
+          ${op ? `
+          <div><div style="color:var(--muted);font-size:11px">Otkup VT viška</div><div style="font-family:var(--mono);color:#22c55e">${op.vt_kwh} kWh → ${op.vt_eur} €</div></div>
+          <div><div style="color:var(--muted);font-size:11px">Otkup NT viška</div><div style="font-family:var(--mono);color:#22c55e">${op.nt_kwh} kWh → ${op.nt_eur} €</div></div>` : ''}
+        </div>
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-size:13px">
+          <strong>Neto za platiti: <span style="color:${neto>=0?'#f87171':'#22c55e'};font-family:var(--mono)">${neto} €</span></strong>
+          <span style="color:var(--muted);font-size:11px"> · račun ${bp.iznos} € + fiksno ${d.fiksne_naknade} €${op?.ukupno_eur ? ' − otkup '+op.ukupno_eur+' €' : ''}</span>
+        </div>
+      </div>`;
+    }
+
     box.innerHTML = `
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px;font-family:var(--mono)">${d.model}</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:10px">
         <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px">
           <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Proteklo (${d.dani_s_podacima}/${d.n_dana_mjesec} dana)</div>
@@ -1884,9 +2004,10 @@ async function loadProcjenaTrenutni() {
           <div style="font-size:11px;color:var(--muted);margin-top:2px">VT ${d.kwh_vt_proteklo} / NT ${d.kwh_nt_proteklo} kWh</div>
         </div>
       </div>
-      <div style="font-size:12px;color:var(--muted)">
+      ${bijeli_html}
+      <div style="font-size:12px;color:var(--muted);margin-top:10px">
         Procjena vrijedi za <strong>${d.mjesec}</strong>, ${d.postotak_mjeseca}% mjeseca odrađeno.
-        Tarife: VT ${(d.tarifa.vt_kwh*100).toFixed(2)} c/kWh · NT ${(d.tarifa.nt_kwh*100).toFixed(2)} c/kWh · otkup ${(d.tarifa.otkup*100).toFixed(2)} c/kWh · PDV ${(d.tarifa.pdv*100).toFixed(0)}%.
+        Tarife: VT ${(d.tarifa.vt_kwh*100).toFixed(2)} c/kWh · NT ${(d.tarifa.nt_kwh*100).toFixed(2)} c/kWh · VT otkup ${(d.tarifa.vt_otkup*100).toFixed(2)} c/kWh · PDV ${(d.tarifa.pdv*100).toFixed(0)}%.
       </div>`;
   } catch(e) {
     box.innerHTML = '<em style="color:#f87171">Greška: '+e+'</em>';

@@ -155,7 +155,10 @@ def api_procjena_trenutni():
     """
     from datetime import datetime
     from calendar import monthrange
-    from ..tariff import HEP_TARIFA, get_vt_udio, izracunaj_racun
+    from ..tariff import (
+        HEP_TARIFA, get_vt_udio, izracunaj_racun,
+        izracunaj_racun_bijeli, otkup_viskova_bijeli,
+    )
 
     now = datetime.now()
     god, mj = now.year, now.month
@@ -180,16 +183,21 @@ def api_procjena_trenutni():
                             THEN kwh_plus ELSE 0 END), 2) as kwh_vt,
                 ROUND(SUM(CASE WHEN CAST(strftime('%H', ts) AS INT) BETWEEN ? AND ?
                             THEN 0 ELSE kwh_plus END), 2) as kwh_nt,
+                ROUND(SUM(CASE WHEN CAST(strftime('%H', ts) AS INT) BETWEEN ? AND ?
+                            THEN kwh_minus ELSE 0 END), 2) as kwh_vt_pred,
+                ROUND(SUM(CASE WHEN CAST(strftime('%H', ts) AS INT) BETWEEN ? AND ?
+                            THEN 0 ELSE kwh_minus END), 2) as kwh_nt_pred,
                 MAX(ts) as zadnji_ts,
                 MIN(ts) as prvi_ts
             FROM ocitanja_satna
             WHERE substr(ts,1,7) = ?
-        ''', (vt_od, vt_hi, vt_od, vt_hi, mj_str)).fetchone()
+        ''', (vt_od, vt_hi, vt_od, vt_hi,
+              vt_od, vt_hi, vt_od, vt_hi, mj_str)).fetchone()
 
-        # zadnji uvezeni račun za pretplatu (ako postoji)
+        # zadnji uvezeni račun za pretplatu i model tarife
         last_bill = conn.execute('''
-            SELECT pretplata, mjerna_mjernina FROM racuni
-            WHERE pretplata IS NOT NULL
+            SELECT pretplata, mjerna_mjernina, model_tarife FROM racuni
+            WHERE pretplata IS NOT NULL OR model_tarife IS NOT NULL
             ORDER BY datum_racuna DESC LIMIT 1
         ''').fetchone()
     finally:
@@ -199,6 +207,8 @@ def api_procjena_trenutni():
     km = row['kwh_minus'] or 0
     kvt = row['kwh_vt'] or 0
     knt = row['kwh_nt'] or 0
+    kvt_pred = row['kwh_vt_pred'] or 0
+    knt_pred = row['kwh_nt_pred'] or 0
     # broj dana s podacima (dani s ts u tekućem mjesecu)
     try:
         prvi = row['prvi_ts']
@@ -220,10 +230,30 @@ def api_procjena_trenutni():
     # Stvarni VT udio za sad
     vt_udio_real = (kvt / kp) if kp > 0 else get_vt_udio()
 
-    # Trošak: do sad
-    proteklo_racun = izracunaj_racun(kp, km, dani_s_podacima, vt_udio=vt_udio_real)
-    # Procjena za cijeli mjesec
-    proj_racun = izracunaj_racun(proj_kp, proj_km, n_dana_mj, vt_udio=vt_udio_real)
+    # Detekcija tarifnog modela
+    model_str = (last_bill['model_tarife'] if last_bill else '') or ''
+    is_bijeli = 'bijeli' in model_str.lower() or 'BIJ' in model_str.upper()
+
+    proj_kvt = round(kvt * faktor, 2)
+    proj_knt = round(knt * faktor, 2)
+    proj_kvt_pred = round(kvt_pred * faktor, 2)
+    proj_knt_pred = round(knt_pred * faktor, 2)
+
+    if is_bijeli:
+        # HEPI bijeli — net metering
+        det_proteklo = izracunaj_racun_bijeli(kvt, knt, kvt_pred, knt_pred, dani_s_podacima)
+        det_proj     = izracunaj_racun_bijeli(proj_kvt, proj_knt, proj_kvt_pred, proj_knt_pred, n_dana_mj)
+        otkup_proteklo = otkup_viskova_bijeli(kvt, knt, kvt_pred, knt_pred)
+        otkup_proj     = otkup_viskova_bijeli(proj_kvt, proj_knt, proj_kvt_pred, proj_knt_pred)
+        proteklo_racun = det_proteklo['iznos']
+        proj_racun     = det_proj['iznos']
+        model_label    = 'HEPI bijeli (net-metering)'
+    else:
+        proteklo_racun = izracunaj_racun(kp, km, dani_s_podacima, vt_udio=vt_udio_real)
+        proj_racun     = izracunaj_racun(proj_kp, proj_km, n_dana_mj, vt_udio=vt_udio_real)
+        det_proteklo = det_proj = None
+        otkup_proteklo = otkup_proj = None
+        model_label = 'Standardni dvotarifni'
 
     # Pretplate (fiksni dio)
     pret_opskrba = (last_bill['pretplata'] if last_bill else None) or HEP_TARIFA['opskrbna_mj']
@@ -232,6 +262,7 @@ def api_procjena_trenutni():
 
     return jsonify({
         'mjesec':              mj_str,
+        'model':               model_label,
         'n_dana_mjesec':       n_dana_mj,
         'dani_s_podacima':     dani_s_podacima,
         'proteklo_dana':       proteklo_dana,
@@ -240,18 +271,26 @@ def api_procjena_trenutni():
         'kwh_minus_proteklo':  km,
         'kwh_vt_proteklo':     kvt,
         'kwh_nt_proteklo':     knt,
+        'kwh_vt_pred_proteklo': kvt_pred,
+        'kwh_nt_pred_proteklo': knt_pred,
         'kwh_plus_procjena':   proj_kp,
         'kwh_minus_procjena':  proj_km,
         'racun_proteklo':      proteklo_racun,
         'racun_procjena':      proj_racun,
         'fiksne_naknade':      fiksno,
         'vt_udio_stvarni':     round(100 * vt_udio_real, 1),
+        'bijeli_proteklo':     det_proteklo,
+        'bijeli_procjena':     det_proj,
+        'otkup_proteklo':      otkup_proteklo,
+        'otkup_procjena':      otkup_proj,
         'tarifa': {
             'vt_kwh': round(HEP_TARIFA['vt_opskrba'] + HEP_TARIFA['vt_distrib'] + HEP_TARIFA['vt_prijenos'], 6),
             'nt_kwh': round(HEP_TARIFA['nt_opskrba'] + HEP_TARIFA['nt_distrib'] + HEP_TARIFA['nt_prijenos'], 6),
-            'pretplata': fiksno,
-            'pdv':       HEP_TARIFA['pdv'],
-            'otkup':     HEP_TARIFA['otkup'],
+            'pretplata':  fiksno,
+            'pdv':        HEP_TARIFA['pdv'],
+            'otkup':      HEP_TARIFA['otkup'],
+            'vt_otkup':   HEP_TARIFA['vt_otkup'],
+            'nt_otkup':   HEP_TARIFA['nt_otkup'],
         },
     })
 
