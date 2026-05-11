@@ -1,8 +1,8 @@
-"""/api/stats/* + /api/stats/mjesecni"""
+"""/api/stats/* + /api/stats/mjesecni + /api/stats/vt-kalibracija"""
 
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 
-from ..db import get_db
+from ..db import get_config, get_db
 from ..tariff import HEP_TARIFA, izracunaj_racun
 
 bp = Blueprint('stats', __name__, url_prefix='/api/stats')
@@ -138,6 +138,84 @@ def api_mjesecni():
             'mjeseci': result,
             'tarifa':  HEP_TARIFA,
             'racuni':  racuni,
+        })
+    finally:
+        conn.close()
+
+
+@bp.route('/vt-kalibracija')
+def api_vt_kalibracija():
+    """Izračunaj stvarni VT udio iz HEP satnih očitanja.
+
+    Vraća dva izračuna:
+      - simple:  VT = ure unutar [VT_OD, VT_DO), svi dani
+      - workdays: VT = ure unutar [VT_OD, VT_DO), ponedjeljak-petak
+
+    Query params:
+      mjesec=YYYY-MM   (default = zadnja 3 mjeseca)
+      vt_od / vt_do    (default iz config: TARIFA_VT_OD, TARIFA_VT_DO)
+    """
+    mjesec = request.args.get('mjesec')
+    try:
+        vt_od = int(request.args.get('vt_od', get_config('TARIFA_VT_OD', '7')))
+        vt_do = int(request.args.get('vt_do', get_config('TARIFA_VT_DO', '21')))
+    except (TypeError, ValueError):
+        vt_od, vt_do = 7, 21
+
+    # Bounds: VT je sat ∈ [vt_od, vt_do - 1]
+    vt_hi = vt_do - 1
+
+    conn = get_db()
+    try:
+        if mjesec:
+            where = "WHERE substr(ts,1,7) = ?"
+            params = (mjesec,)
+            group  = ""
+            limit  = ""
+        else:
+            where = "WHERE ts >= datetime('now','-12 months')"
+            params = ()
+            group  = "GROUP BY substr(ts,1,7)"
+            limit  = "ORDER BY mj DESC LIMIT 12"
+
+        sql = f'''
+            SELECT substr(ts,1,7) as mj,
+                   ROUND(SUM(CASE WHEN CAST(strftime('%H', ts) AS INT) BETWEEN ? AND ?
+                              THEN kwh_plus ELSE 0 END), 2) as vt_simple,
+                   ROUND(SUM(CASE WHEN CAST(strftime('%w', ts) AS INT) BETWEEN 1 AND 5
+                                   AND CAST(strftime('%H', ts) AS INT) BETWEEN ? AND ?
+                              THEN kwh_plus ELSE 0 END), 2) as vt_workdays,
+                   ROUND(SUM(kwh_plus), 2) as ukupno
+            FROM ocitanja_satna
+            {where}
+            {group}
+            {limit}
+        '''
+        rows = conn.execute(sql, (vt_od, vt_hi, vt_od, vt_hi) + params).fetchall()
+
+        out = []
+        for r in rows:
+            uk = r['ukupno'] or 0
+            vs = r['vt_simple'] or 0
+            vw = r['vt_workdays'] or 0
+            out.append({
+                'mjesec':           r['mj'],
+                'ukupno_kwh':       uk,
+                'vt_simple_kwh':    vs,
+                'nt_simple_kwh':    round(uk - vs, 2),
+                'vt_simple_perc':   round(100 * vs / uk, 1) if uk else None,
+                'vt_workdays_kwh':  vw,
+                'nt_workdays_kwh':  round(uk - vw, 2),
+                'vt_workdays_perc': round(100 * vw / uk, 1) if uk else None,
+            })
+
+        return jsonify({
+            'vt_od': vt_od, 'vt_do': vt_do,
+            'mjeseci': out,
+            'objasnjenje': {
+                'simple':   f'VT = svi dani u satima {vt_od}-{vt_do}h',
+                'workdays': f'VT = pon–pet u satima {vt_od}-{vt_do}h, vikend cijeli NT',
+            },
         })
     finally:
         conn.close()

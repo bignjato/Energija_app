@@ -685,11 +685,13 @@ tr:hover td { background: var(--surface2); }
                  oninput="document.getElementById('cfg-vt-udio-val').textContent=this.value+'%'">
           <div id="cfg-vt-udio-val" style="font-family:var(--mono);font-size:18px;color:#22d3ee;min-width:60px;text-align:right">45%</div>
         </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
           <button class="btn btn-secondary btn-sm" onclick="setVtUdio(35)">Ljeto 35%</button>
           <button class="btn btn-secondary btn-sm" onclick="setVtUdio(45)">Prosjek 45%</button>
           <button class="btn btn-secondary btn-sm" onclick="setVtUdio(55)">Zima 55%</button>
+          <button class="btn btn-primary btn-sm" onclick="loadVtKalibracija()">🎯 Auto-kalibracija iz HEP podataka</button>
         </div>
+        <div id="vt-kalibracija" style="display:none;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px"></div>
       </div>
     </div>
 
@@ -1109,6 +1111,63 @@ function setVtUdio(v){
   if (el) {
     el.value = v;
     document.getElementById('cfg-vt-udio-val').textContent = v + '%';
+  }
+}
+
+async function loadVtKalibracija(){
+  const box = document.getElementById('vt-kalibracija');
+  box.style.display = 'block';
+  box.innerHTML = 'Računam iz HEP satnih očitanja...';
+  try {
+    const r = await fetch('/api/stats/vt-kalibracija', {credentials:'same-origin'});
+    const d = await r.json();
+    const valid = (d.mjeseci || []).filter(m => m.ukupno_kwh > 0);
+    if (!valid.length) {
+      box.innerHTML = '<div style="color:#f87171">Nema dovoljno HEP podataka.</div>';
+      return;
+    }
+    // Prosjek zadnjih 12 mj.
+    const totUk = valid.reduce((s,m) => s + m.ukupno_kwh, 0);
+    const totVtS = valid.reduce((s,m) => s + m.vt_simple_kwh, 0);
+    const totVtW = valid.reduce((s,m) => s + m.vt_workdays_kwh, 0);
+    const avgSimple = Math.round(100 * totVtS / totUk);
+    const avgWorkdays = Math.round(100 * totVtW / totUk);
+
+    let html = `<div style="margin-bottom:10px;color:var(--muted)">
+      <strong style="color:var(--text)">Stvarni VT udio iz HEP satnih očitanja</strong>
+      (sat ${d.vt_od}-${d.vt_do}h, zadnjih ${valid.length} mj.):
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+      <div style="border:1px solid var(--border);border-radius:6px;padding:10px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Simple (svi dani)</div>
+        <div style="font-size:24px;color:#22d3ee;font-family:var(--mono);margin:6px 0">${avgSimple}%</div>
+        <button class="btn btn-secondary btn-sm" onclick="setVtUdio(${avgSimple})">Primijeni</button>
+      </div>
+      <div style="border:1px solid var(--border);border-radius:6px;padding:10px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Bez vikenda (pon–pet)</div>
+        <div style="font-size:24px;color:#22d3ee;font-family:var(--mono);margin:6px 0">${avgWorkdays}%</div>
+        <button class="btn btn-secondary btn-sm" onclick="setVtUdio(${avgWorkdays})">Primijeni</button>
+      </div>
+    </div>
+    <table style="width:100%;font-size:12px;border-collapse:collapse">
+      <thead><tr style="color:var(--muted)">
+        <th style="text-align:left;padding:4px">Mjesec</th>
+        <th style="text-align:right;padding:4px">Ukupno kWh</th>
+        <th style="text-align:right;padding:4px">VT simple %</th>
+        <th style="text-align:right;padding:4px">VT pon–pet %</th>
+      </tr></thead><tbody>`;
+    for (const m of valid) {
+      html += `<tr>
+        <td style="padding:4px;font-family:var(--mono)">${m.mjesec}</td>
+        <td style="padding:4px;text-align:right;font-family:var(--mono)">${m.ukupno_kwh}</td>
+        <td style="padding:4px;text-align:right;font-family:var(--mono)">${m.vt_simple_perc ?? '—'}%</td>
+        <td style="padding:4px;text-align:right;font-family:var(--mono)">${m.vt_workdays_perc ?? '—'}%</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+    box.innerHTML = html;
+  } catch(e) {
+    box.innerHTML = '<div style="color:#f87171">Greška: ' + e + '</div>';
   }
 }
 
