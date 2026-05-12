@@ -207,19 +207,6 @@ tr:hover td { background: var(--surface2); }
 
   <div class="g2">
     <div class="card">
-      <div class="card-title">☀️ SMA — trenutno</div>
-      <div class="flow4">
-        <div class="fl"><div class="fl-lbl">Solarno</div><div class="fl-val c-solar" id="lv-sol">—</div><div class="fl-unit">W</div></div>
-        <div class="fl"><div class="fl-lbl">Potrošnja</div><div class="fl-val c-consume" id="lv-con">—</div><div class="fl-unit">W</div></div>
-        <div class="fl"><div class="fl-lbl">Predaja</div><div class="fl-val c-feed" id="lv-fee">—</div><div class="fl-unit">W</div></div>
-        <div class="fl"><div class="fl-lbl">Iz mreže</div><div class="fl-val c-grid" id="lv-grd">—</div><div class="fl-unit">W</div></div>
-      </div>
-      <div class="aut-row">
-        <div class="aut-hdr"><span>Autarkija</span><b id="lv-aut">—</b></div>
-        <div class="aut-bar"><div class="aut-fill" id="lv-aut-bar" style="width:0"></div></div>
-      </div>
-    </div>
-    <div class="card">
       <div class="card-title">📅 Danas — SMA <span style="font-size:11px;color:var(--muted);font-weight:400">(live, real-time)</span></div>
       <div class="flow4">
         <div class="fl"><div class="fl-lbl">Solar proizvodnja</div><div class="fl-val c-solar" id="d-sma-p">—</div><div class="fl-unit">kWh</div></div>
@@ -242,21 +229,29 @@ tr:hover td { background: var(--surface2); }
   <!-- ====== Energy flow vizualizacija + Weather ====== -->
   <div class="g2" style="margin-bottom:14px">
     <div class="card">
-      <div class="card-title">⚡ Energy flow — live</div>
-      <div id="energy-flow" style="position:relative;height:200px;display:flex;align-items:center;justify-content:space-around;font-family:var(--mono);font-size:13px">
+      <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+        <span>⚡ Energy flow — live</span>
+        <span id="ef-status" style="font-size:11px;color:var(--muted);font-weight:400;font-family:var(--mono)">⏳</span>
+      </div>
+      <div id="energy-flow" style="position:relative;min-height:200px;display:flex;align-items:center;justify-content:space-around;font-family:var(--mono);font-size:13px">
         <!-- Populated by JS -->
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:8px">
+        <span id="ef-autarkija">Autarkija: —</span>
+        <span id="ef-selfcons">Self-consumption: —</span>
+        <span id="ef-refresh">—</span>
       </div>
     </div>
     <div class="card">
       <div class="card-title">🌤️ Vrijeme — <span id="weather-loc">lokacija</span></div>
-      <div id="weather" style="display:flex;align-items:center;gap:20px;padding:12px 0;font-size:14px">
-        <div style="font-size:48px" id="weather-icon">⏳</div>
+      <div style="display:flex;align-items:center;gap:16px;padding:8px 0">
+        <div style="font-size:48px;line-height:1" id="weather-icon">⏳</div>
         <div style="flex:1">
-          <div style="font-size:32px;color:var(--text);font-family:var(--mono)" id="weather-temp">—</div>
-          <div style="font-size:13px;color:var(--muted)" id="weather-desc">Učitavam…</div>
-          <div style="font-size:11px;color:var(--muted);margin-top:6px" id="weather-fc"></div>
+          <div style="font-size:30px;color:var(--text);font-family:var(--mono);line-height:1" id="weather-temp">—</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:4px" id="weather-desc">Učitavam…</div>
         </div>
       </div>
+      <div id="weather-7day" style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-top:10px;font-size:11px"></div>
     </div>
   </div>
 
@@ -1014,16 +1009,8 @@ function renderPregled(){
   const hasSma=D.sma_live!=null;
   document.getElementById('noSmaNotice').style.display=hasSma?'none':'block';
 
-  if(hasSma){
-    const l=D.sma_live;
-    set('lv-sol',f0(l.pv_generation_w));
-    set('lv-con',f0(l.total_consumption_w));
-    set('lv-fee',f0(l.feed_in_w));
-    set('lv-grd',f0(l.external_consumption_w));
-    const a=(l.autarky_rate||0)*100;
-    set('lv-aut',f0(a)+'%');
-    document.getElementById('lv-aut-bar').style.width=Math.min(100,a)+'%';
-  }
+  // SMA-trenutno widget je uklonjen — Energy flow ga zamijenio
+  if(hasSma) loadEnergyFlow();
 
   // SMA — danas (live agregirano iz sma_live)
   const sT = D.sma_today || D.sma_dnevna.find(r=>r.datum===today()) || {};
@@ -2176,61 +2163,119 @@ async function loadWeather() {
     set('weather-temp', (cur.temperature_2m ?? '—') + '°C');
     set('weather-desc', `${wmo[1]} · vjetar ${(cur.wind_speed_10m ?? 0).toFixed(0)} km/h · oblačnost ${cur.cloud_cover ?? 0}%`);
     set('weather-loc', d.timezone ? d.timezone.replace('_',' ') : 'lokacija');
-    // Forecast 2 dana
+
+    // 7-dan strip
     const daily = d.daily || {};
-    const fc = [];
-    for (let i = 1; i <= 2 && i < (daily.time||[]).length; i++) {
+    const days = daily.time || [];
+    let html = '';
+    for (let i = 0; i < days.length; i++) {
       const w = WMO_CODES[daily.weather_code[i]] || ['🌡️',''];
-      const day = new Date(daily.time[i]).toLocaleDateString('hr-HR',{weekday:'short'});
-      fc.push(`${day} ${w[0]} ${daily.temperature_2m_min[i]?.toFixed(0)}–${daily.temperature_2m_max[i]?.toFixed(0)}°C`);
+      const dt = new Date(days[i]);
+      const isToday = i === 0;
+      const dayLbl = isToday ? 'Danas' : dt.toLocaleDateString('hr-HR',{weekday:'short'}).replace('.','');
+      const tmax = daily.temperature_2m_max[i];
+      const tmin = daily.temperature_2m_min[i];
+      const cloud = daily.cloud_cover_mean ? daily.cloud_cover_mean[i] : null;
+      const sun_h = daily.sunshine_duration ? Math.round(daily.sunshine_duration[i]/3600) : null;
+      const precip = daily.precipitation_sum ? daily.precipitation_sum[i] : 0;
+      html += `
+        <div style="background:var(--bg);border:1px solid ${isToday?'var(--accent)':'var(--border)'};border-radius:6px;padding:8px 4px;text-align:center" title="${w[1]}">
+          <div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:${isToday?700:400}">${dayLbl}</div>
+          <div style="font-size:24px;line-height:1;margin:4px 0">${w[0]}</div>
+          <div style="font-size:12px;font-family:var(--mono)"><strong>${tmax?.toFixed(0)}°</strong></div>
+          <div style="font-size:10px;color:var(--muted);font-family:var(--mono)">${tmin?.toFixed(0)}°</div>
+          ${sun_h!=null?`<div style="font-size:10px;color:#fbbf24;margin-top:2px">☀️ ${sun_h}h</div>`:''}
+          ${precip>0?`<div style="font-size:10px;color:#22d3ee">💧 ${precip.toFixed(1)}mm</div>`:''}
+        </div>`;
     }
-    set('weather-fc', fc.join(' · '));
+    document.getElementById('weather-7day').innerHTML = html;
   } catch(e) { set('weather-desc', 'Greška: '+e); }
 }
 
-function loadEnergyFlow() {
-  // SVG flow vizualizacija na temelju D.sma_live (već dohvaćen kroz /api/data)
-  if (!D || !D.sma_live) return;
-  const l = D.sma_live;
-  const pv   = Math.round(l.pv_generation_w || 0);
-  const feed = Math.round(l.feed_in_w || 0);
-  const cons = Math.round(l.total_consumption_w || 0);
-  const grid = Math.round(l.external_consumption_w || 0);
-  const direct = Math.max(0, pv - feed);  // kuća iz solara
+function _renderEnergyFlow(live) {
+  if (!live) {
+    document.getElementById('energy-flow').innerHTML =
+      '<div style="color:var(--muted);font-size:13px;padding:40px 0;text-align:center;width:100%">Nema live podataka iz SMA.</div>';
+    set('ef-status', '⚠ nema podataka');
+    return;
+  }
+  const pv   = Math.round(live.pv_generation_w || 0);
+  const feed = Math.round(live.feed_in_w || 0);
+  const cons = Math.round(live.total_consumption_w || 0);
+  const grid = Math.round(live.external_consumption_w || 0);
+  const direct = Math.max(0, Math.min(pv, cons));      // kuća iz solara
+  const battery = (live.battery_soc != null) ? live.battery_soc : null;
 
-  const flowToFeed = feed > 0;
-  const flowToGrid = grid > 0;
-  const arrow = (active, dir) => active
-    ? `<div style="font-size:24px;color:#22d3ee;animation:flowblink 1.5s infinite">${dir}</div>`
+  // Computed metrics
+  const autarky = cons > 0 ? Math.round(100 * (1 - grid / cons)) : (pv > 0 ? 100 : 0);
+  const selfCons = pv > 0 ? Math.round(100 * direct / pv) : 0;
+
+  const arrow = (active, dir, color = '#22d3ee') => active
+    ? `<div style="font-size:24px;color:${color};animation:flowblink 1.5s infinite">${dir}</div>`
     : `<div style="font-size:24px;color:#1f2d3d">${dir}</div>`;
 
   document.getElementById('energy-flow').innerHTML = `
     <style>@keyframes flowblink{0%,100%{opacity:.4}50%{opacity:1}}</style>
-    <div style="text-align:center">
-      <div style="font-size:36px">☀️</div>
+    <div style="text-align:center;flex:1">
+      <div style="font-size:42px">${pv > 0 ? '☀️' : '🌙'}</div>
       <div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-top:4px">PV</div>
-      <div style="font-size:20px;color:#fbbf24;font-family:var(--mono)">${pv} W</div>
+      <div style="font-size:22px;color:#fbbf24;font-family:var(--mono);font-weight:700">${pv.toLocaleString()} W</div>
     </div>
-    ${arrow(pv>0, '→')}
-    <div style="text-align:center">
-      <div style="font-size:36px">🏠</div>
+    ${arrow(pv > 0, '→', '#fbbf24')}
+    <div style="text-align:center;flex:1">
+      <div style="font-size:42px">🏠</div>
       <div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-top:4px">Kuća</div>
-      <div style="font-size:20px;color:#a78bfa;font-family:var(--mono)">${cons} W</div>
-      <div style="font-size:10px;color:var(--muted);margin-top:2px">solar: ${direct}W</div>
+      <div style="font-size:22px;color:#a78bfa;font-family:var(--mono);font-weight:700">${cons.toLocaleString()} W</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:2px">od toga solar: ${direct} W</div>
     </div>
-    <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
-      ${flowToFeed ? '<div style="font-size:18px;color:#22c55e;animation:flowblink 1.5s infinite">↑</div>' : '<div style="font-size:18px;color:#1f2d3d">↑</div>'}
-      ${flowToGrid ? '<div style="font-size:18px;color:#f87171;animation:flowblink 1.5s infinite">↓</div>' : '<div style="font-size:18px;color:#1f2d3d">↓</div>'}
+    <div style="display:flex;flex-direction:column;align-items:center;gap:6px;flex:0 0 auto;padding:0 8px">
+      ${arrow(feed > 0, '↑', '#22c55e')}
+      ${arrow(grid > 0, '↓', '#f87171')}
     </div>
-    <div style="text-align:center">
-      <div style="font-size:36px">⚡</div>
+    <div style="text-align:center;flex:1">
+      <div style="font-size:42px">⚡</div>
       <div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-top:4px">Mreža</div>
-      <div style="font-size:14px;font-family:var(--mono)">
-        <div style="color:#22c55e">↑ ${feed} W</div>
-        <div style="color:#f87171">↓ ${grid} W</div>
+      <div style="font-size:14px;font-family:var(--mono);margin-top:2px">
+        <div style="color:#22c55e">↑ ${feed.toLocaleString()} W</div>
+        <div style="color:#f87171">↓ ${grid.toLocaleString()} W</div>
       </div>
     </div>
+    ${battery != null ? `
+    <div style="text-align:center;flex:1">
+      <div style="font-size:42px">🔋</div>
+      <div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-top:4px">Baterija</div>
+      <div style="font-size:22px;color:#22d3ee;font-family:var(--mono);font-weight:700">${Math.round(battery)}%</div>
+    </div>` : ''}
   `;
+
+  set('ef-autarkija',  `Autarkija: <strong style="color:#22c55e">${autarky}%</strong>`);
+  set('ef-selfcons',   `Self-consumption: <strong style="color:#fbbf24">${selfCons}%</strong>`);
+
+  // Last refresh — koristi ts iz live record-a + računaj koliko je davno
+  const ts = live.ts ? new Date(live.ts.replace('+00:00','Z').replace(/\.\d+$/,'')) : null;
+  if (ts && !isNaN(ts)) {
+    const ageSec = Math.round((Date.now() - ts.getTime()) / 1000);
+    const ageStr = ageSec < 60 ? ageSec+'s' : ageSec < 3600 ? Math.round(ageSec/60)+'min' : Math.round(ageSec/3600)+'h';
+    const fresh = ageSec < 360;  // 6 min
+    set('ef-status',  fresh ? `🟢 LIVE (${ageStr} ago)` : `🟡 STALE (${ageStr} ago)`);
+    set('ef-refresh', `Posljednji refresh: ${ts.toLocaleTimeString('hr-HR')}`);
+  } else {
+    set('ef-status',  '⏳');
+    set('ef-refresh', '—');
+  }
+}
+
+async function loadEnergyFlow() {
+  // Dohvati svjež zapis direktno — ne pouzdaj se na D.sma_live koji može biti par minuta star
+  set('ef-status', '⏳ refresh…');
+  try {
+    const r = await fetch('/api/sma/live', {credentials:'same-origin'});
+    const j = await r.json();
+    _renderEnergyFlow(j.error ? null : j);
+  } catch(e) {
+    // fallback na D
+    _renderEnergyFlow(D && D.sma_live);
+  }
 }
 
 let _powLimitChart = null;
