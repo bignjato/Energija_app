@@ -2193,22 +2193,39 @@ async function loadWeather() {
 }
 
 function _renderEnergyFlow(live) {
+  const efStatus = document.getElementById('ef-status');
   if (!live) {
     document.getElementById('energy-flow').innerHTML =
       '<div style="color:var(--muted);font-size:13px;padding:40px 0;text-align:center;width:100%">Nema live podataka iz SMA.</div>';
-    set('ef-status', '⚠ nema podataka');
+    if (efStatus) efStatus.textContent = '⚠ nema podataka';
     return;
   }
-  const pv   = Math.round(live.pv_generation_w || 0);
+  let pv     = Math.round(live.pv_generation_w || 0);
   const feed = Math.round(live.feed_in_w || 0);
-  const cons = Math.round(live.total_consumption_w || 0);
   const grid = Math.round(live.external_consumption_w || 0);
-  const direct = Math.max(0, Math.min(pv, cons));      // kuća iz solara
   const battery = (live.battery_soc != null) ? live.battery_soc : null;
 
+  // Sanity: ako feed > pv (bez baterije), PV je underreported (npr. drugi
+  // inverter offline u HA-u). Korigiraj pv da reflectira stvarnu proizvodnju.
+  let warning = '';
+  if (pv < feed && battery == null) {
+    const corrected = feed + grid;
+    warning = `⚠ Drugi inverter offline u HA · PV korigiran (${pv} → ${corrected} W)`;
+    pv = corrected;
+  }
+
+  // cons: prvi direktni sensor, inače computed iz pv-feed+grid
+  let cons;
+  if (live.total_consumption_w != null && live.total_consumption_w > 0) {
+    cons = Math.round(live.total_consumption_w);
+  } else {
+    cons = Math.max(0, pv - feed + grid);
+  }
+  const direct = Math.max(0, Math.min(pv - feed, cons));     // kuća iz solara
+
   // Computed metrics
-  const autarky = cons > 0 ? Math.round(100 * (1 - grid / cons)) : (pv > 0 ? 100 : 0);
-  const selfCons = pv > 0 ? Math.round(100 * direct / pv) : 0;
+  const autarky = cons > 0 ? Math.max(0, Math.min(100, Math.round(100 * (1 - grid / cons)))) : (pv > 0 ? 100 : 0);
+  const selfCons = pv > 0 ? Math.min(100, Math.round(100 * direct / pv)) : 0;
 
   const arrow = (active, dir, color = '#22d3ee') => active
     ? `<div style="font-size:24px;color:${color};animation:flowblink 1.5s infinite">${dir}</div>`
@@ -2246,22 +2263,28 @@ function _renderEnergyFlow(live) {
       <div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-top:4px">Baterija</div>
       <div style="font-size:22px;color:#22d3ee;font-family:var(--mono);font-weight:700">${Math.round(battery)}%</div>
     </div>` : ''}
+    ${warning ? `<div style="position:absolute;bottom:-4px;left:0;right:0;text-align:center;font-size:11px;color:#fbbf24">${warning}</div>` : ''}
   `;
 
-  set('ef-autarkija',  `Autarkija: <strong style="color:#22c55e">${autarky}%</strong>`);
-  set('ef-selfcons',   `Self-consumption: <strong style="color:#fbbf24">${selfCons}%</strong>`);
+  // innerHTML umjesto textContent — strong tagovi se moraju renderirati
+  const autEl = document.getElementById('ef-autarkija');
+  const scEl  = document.getElementById('ef-selfcons');
+  if (autEl) autEl.innerHTML = `Autarkija: <strong style="color:#22c55e">${autarky}%</strong>`;
+  if (scEl)  scEl.innerHTML  = `Self-consumption: <strong style="color:#fbbf24">${selfCons}%</strong>`;
 
-  // Last refresh — koristi ts iz live record-a + računaj koliko je davno
+  // Last refresh
   const ts = live.ts ? new Date(live.ts.replace('+00:00','Z').replace(/\.\d+$/,'')) : null;
+  const efStatus  = document.getElementById('ef-status');
+  const efRefresh = document.getElementById('ef-refresh');
   if (ts && !isNaN(ts)) {
     const ageSec = Math.round((Date.now() - ts.getTime()) / 1000);
     const ageStr = ageSec < 60 ? ageSec+'s' : ageSec < 3600 ? Math.round(ageSec/60)+'min' : Math.round(ageSec/3600)+'h';
     const fresh = ageSec < 360;  // 6 min
-    set('ef-status',  fresh ? `🟢 LIVE (${ageStr} ago)` : `🟡 STALE (${ageStr} ago)`);
-    set('ef-refresh', `Posljednji refresh: ${ts.toLocaleTimeString('hr-HR')}`);
+    if (efStatus)  efStatus.textContent = fresh ? `🟢 LIVE (${ageStr} ago)` : `🟡 STALE (${ageStr} ago)`;
+    if (efRefresh) efRefresh.textContent = `Posljednji refresh: ${ts.toLocaleTimeString('hr-HR')}`;
   } else {
-    set('ef-status',  '⏳');
-    set('ef-refresh', '—');
+    if (efStatus)  efStatus.textContent = '⏳';
+    if (efRefresh) efRefresh.textContent = '—';
   }
 }
 
@@ -2433,6 +2456,12 @@ load();
 syncTimer = setInterval(load, 60000);
 // Učitaj peak snagu odmah (Pregled je default tab)
 loadPeakSnaga();
+// Auto-refresh Energy flow svakih 10 sekundi (samo kad je Pregled aktivan)
+setInterval(() => {
+  if (document.getElementById('page-pregled')?.classList.contains('active')) {
+    loadEnergyFlow();
+  }
+}, 10000);
 </script>
 </body>
 </html>
