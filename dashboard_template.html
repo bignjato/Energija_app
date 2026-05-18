@@ -2274,7 +2274,6 @@ function _renderEnergyFlow(live) {
 
   // Last refresh
   const ts = live.ts ? new Date(live.ts.replace('+00:00','Z').replace(/\.\d+$/,'')) : null;
-  const efStatus  = document.getElementById('ef-status');
   const efRefresh = document.getElementById('ef-refresh');
   if (ts && !isNaN(ts)) {
     const ageSec = Math.round((Date.now() - ts.getTime()) / 1000);
