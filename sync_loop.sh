@@ -67,12 +67,15 @@ while true; do
         echo "[hourly] HEP + HA sync..." | tee -a "$LOG"
         run python /app/hep_scraper.py --dani 2
         run python /app/ha_sender.py
+        # backfill dnevnih SMA flow-metrika iz sma_live + alert na stale podatke
+        run python /app/maintenance.py --backfill-daily --check-freshness
     fi
 
     # SMA history jednom dnevno (288 × 5min = 24h)
     if [ $((COUNTER % 288)) -eq 0 ]; then
         echo "[daily] SMA history import..." | tee -a "$LOG"
         sma_history
+        run python /app/maintenance.py --prune-live --keep-days 45
     fi
 
     # Backup baze u 02:00 + off-site upload
