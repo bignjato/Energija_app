@@ -88,9 +88,17 @@ class HEPSession:
             )
             if r.status_code == 200:
                 data = r.json()
-                self.token = data.get("Token")
-                self.kupci = data.get("KupacList", [])
-                self.session.headers["Authorization"] = f"Bearer {self.token}"
+                # Novi API (od ~lipnja 2026): response je list kupac-objekata;
+                # auth ide preko Set-Cookie 'accessToken' (session ga drzi).
+                # Stari oblik bio je {"Token": ..., "KupacList": [...]} -> fallback.
+                if isinstance(data, list):
+                    self.kupci = data
+                    self.token = self.session.cookies.get("accessToken")
+                else:
+                    self.token = data.get("Token")
+                    self.kupci = data.get("KupacList", [])
+                    if self.token:
+                        self.session.headers["Authorization"] = f"Bearer {self.token}"
                 self.logged_in = True
                 log.info("Prijava uspjesna! Kupaca: %d", len(self.kupci))
                 return True

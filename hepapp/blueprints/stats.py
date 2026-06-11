@@ -10,30 +10,143 @@ bp = Blueprint('stats', __name__, url_prefix='/api/stats')
 
 @bp.route('/usporedba')
 def api_usporedba():
+    from datetime import datetime as _dt
     conn = get_db()
     try:
-        has_sma = conn.execute(
+        has_sma_dnevna = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='sma_dnevna'"
         ).fetchone() is not None
-        if not has_sma:
-            return jsonify({'error': 'Nema SMA podataka'})
-        rows = conn.execute('''
-            SELECT h.datum,
-                   h.kwh_plus as hep_potrosnja,
-                   h.kwh_minus as hep_predaja,
-                   s.pv_generation_kwh as sma_proizvodnja,
-                   s.feed_in_kwh as sma_predaja,
-                   s.grid_consumption_kwh as sma_mreza,
-                   s.total_consumption_kwh as sma_potrosnja,
-                   s.autarky_rate
-            FROM ocitanja_dnevna h
-            LEFT JOIN sma_dnevna s ON h.datum = s.datum
-            WHERE h.datum >= date('now', '-90 days')
-            ORDER BY h.datum
-        ''').fetchall()
-        return jsonify([dict(r) for r in rows])
+        has_sma_15min = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='sma_15min'"
+        ).fetchone() is not None
+        has_sma_live = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='sma_live'"
+        ).fetchone() is not None
+
+        if has_sma_dnevna:
+            # UNION datuma -> red postoji ako BILO KOJA tablica ima taj datum
+            # (jedan scraper moze kasniti, drugi ne).
+            rows = conn.execute("""
+                WITH datumi AS (
+                    SELECT datum FROM ocitanja_dnevna WHERE datum >= date('now','-90 days')
+                    UNION
+                    SELECT datum FROM sma_dnevna       WHERE datum >= date('now','-90 days')
+                )
+                SELECT d.datum,
+                       h.kwh_plus              as hep_potrosnja,
+                       h.kwh_minus             as hep_predaja,
+                       s.pv_generation_kwh     as sma_proizvodnja,
+                       s.feed_in_kwh           as sma_predaja,
+                       s.grid_consumption_kwh  as sma_mreza,
+                       s.total_consumption_kwh as sma_potrosnja,
+                       s.autarky_rate
+                FROM datumi d
+                LEFT JOIN ocitanja_dnevna h ON h.datum = d.datum
+                LEFT JOIN sma_dnevna       s ON s.datum = d.datum
+                ORDER BY d.datum
+            """).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT datum,
+                       kwh_plus  as hep_potrosnja,
+                       kwh_minus as hep_predaja,
+                       NULL as sma_proizvodnja, NULL as sma_predaja,
+                       NULL as sma_mreza, NULL as sma_potrosnja,
+                       NULL as autarky_rate
+                FROM ocitanja_dnevna
+                WHERE datum >= date('now', '-90 days')
+                ORDER BY datum
+            """).fetchall()
+
+        result = [dict(r) for r in rows]
+        today_str = _dt.now().strftime('%Y-%m-%d')
+        today_row = next((r for r in result if r['datum'] == today_str), None)
+
+        # HEP "danas" iz satne tablice ako dnevni red nedostaje/prazan
+        hep_today = conn.execute("""
+            SELECT ROUND(COALESCE(SUM(kwh_plus),  0), 3) as kp,
+                   ROUND(COALESCE(SUM(kwh_minus), 0), 3) as km,
+                   COUNT(*) as n
+            FROM ocitanja_satna
+            WHERE date(ts) = ?
+        """, (today_str,)).fetchone()
+        has_hep_today = bool(hep_today and hep_today['n'])
+        hep_kp = hep_today['kp'] if hep_today else 0
+        hep_km = hep_today['km'] if hep_today else 0
+
+        # SMA "danas" iz sma_15min (preferirano) ili sma_live
+        sma_today = None
+        if has_sma_15min:
+            t = conn.execute("""
+                SELECT ROUND(SUM(pv_generation_wh)   /1000.0, 3) as pv,
+                       ROUND(SUM(feed_in_wh)         /1000.0, 3) as feed,
+                       ROUND(SUM(grid_consumption_wh)/1000.0, 3) as grid,
+                       ROUND(SUM(total_consumption_wh)/1000.0, 3) as cons,
+                       COUNT(*) as n
+                FROM sma_15min
+                WHERE date(ts) = ?
+            """, (today_str,)).fetchone()
+            if t and t['n']:
+                cons = t['cons'] or 0
+                grid = t['grid'] or 0
+                sma_today = {
+                    'sma_proizvodnja': t['pv']   or 0,
+                    'sma_predaja':     t['feed'] or 0,
+                    'sma_mreza':       grid,
+                    'sma_potrosnja':   cons,
+                    'autarky_rate':    round(1 - grid/cons, 4) if cons > 0 else None,
+                }
+        if sma_today is None and has_sma_live:
+            t = conn.execute("""
+                SELECT COUNT(*) as n,
+                       MIN(ts) as ts_min, MAX(ts) as ts_max,
+                       AVG(pv_generation_w)        as avg_pv,
+                       AVG(feed_in_w)              as avg_feed,
+                       AVG(external_consumption_w) as avg_grid,
+                       AVG(total_consumption_w)    as avg_cons,
+                       AVG(autarky_rate)           as avg_aut
+                FROM sma_live WHERE date(ts) = ?
+            """, (today_str,)).fetchone()
+            if t and t['n']:
+                try:
+                    t1 = _dt.fromisoformat((t['ts_min'] or '').rstrip('Z'))
+                    t2 = _dt.fromisoformat((t['ts_max'] or '').rstrip('Z'))
+                    proteklo_h = max((t2 - t1).total_seconds() / 3600.0, 1/12)
+                except Exception:
+                    proteklo_h = t['n'] / 12.0
+                sma_today = {
+                    'sma_proizvodnja': round((t['avg_pv']   or 0) * proteklo_h / 1000, 3),
+                    'sma_predaja':     round((t['avg_feed'] or 0) * proteklo_h / 1000, 3),
+                    'sma_mreza':       round((t['avg_grid'] or 0) * proteklo_h / 1000, 3),
+                    'sma_potrosnja':   round((t['avg_cons'] or 0) * proteklo_h / 1000, 3),
+                    'autarky_rate':    round(t['avg_aut'] or 0, 4),
+                }
+
+        if has_hep_today or sma_today:
+            if today_row is None:
+                today_row = {
+                    'datum': today_str,
+                    'hep_potrosnja': None, 'hep_predaja': None,
+                    'sma_proizvodnja': None, 'sma_predaja': None,
+                    'sma_mreza': None, 'sma_potrosnja': None,
+                    'autarky_rate': None,
+                }
+                result.append(today_row)
+            today_row['_realtime'] = True
+            if has_hep_today:
+                if not today_row.get('hep_potrosnja'):
+                    today_row['hep_potrosnja'] = hep_kp
+                if not today_row.get('hep_predaja'):
+                    today_row['hep_predaja'] = hep_km
+            if sma_today:
+                for k, v in sma_today.items():
+                    if today_row.get(k) in (None, 0):
+                        today_row[k] = v
+
+        return jsonify(result)
     finally:
         conn.close()
+
 
 
 @bp.route('/optimalno')
