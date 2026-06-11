@@ -215,8 +215,12 @@ def spremi_krivulje(conn, podaci, mjerno_mjesto, je_minus=False):
     if not podaci:
         return 0
     saved = 0
+    # HEP vraca cijeli mjesec unaprijed s nulama — buduce dane ne spremamo
+    danas = datetime.now().strftime("%Y-%m-%d")
     for row in podaci:
         ts  = row.get("Datum") or row.get("datum") or row.get("DateTime")
+        if ts and ts[:10] > danas:
+            continue
         val = parse_vrijednost(row.get("Value") or row.get("Vrijednost") or 0)
         # HEP API vraca kWh za 15-min period, ali sumiran kao da je satni
         # Treba dijeliti s 4 da dobijemo pravi 15-min kWh
@@ -269,6 +273,26 @@ def agregacija(conn, mjerno_mjesto):
         WHERE mjerno_mjesto=?
         GROUP BY mjerno_mjesto, date(ts)
     """, (mjerno_mjesto,))
+    # Trailing nula-dani = HEP jos nije isporucio podatke; obrisi ih da ne
+    # kvare n_dana u procjenama i grafove (dan s 0 kWh u oba smjera ne postoji)
+    conn.execute("""
+        DELETE FROM ocitanja_dnevna WHERE mjerno_mjesto=:m
+          AND kwh_plus=0 AND kwh_minus=0
+          AND datum > (SELECT COALESCE(MAX(datum),'1900-01-01') FROM ocitanja_dnevna
+                       WHERE mjerno_mjesto=:m AND (kwh_plus>0 OR kwh_minus>0))
+    """, {'m': mjerno_mjesto})
+    conn.execute("""
+        DELETE FROM ocitanja_satna WHERE mjerno_mjesto=:m
+          AND kwh_plus=0 AND kwh_minus=0
+          AND ts > (SELECT COALESCE(MAX(ts),'1900-01-01') FROM ocitanja_satna
+                    WHERE mjerno_mjesto=:m AND (kwh_plus>0 OR kwh_minus>0))
+    """, {'m': mjerno_mjesto})
+    conn.execute("""
+        DELETE FROM ocitanja_15min WHERE mjerno_mjesto=:m
+          AND kwh_plus=0 AND kwh_minus=0
+          AND ts > (SELECT COALESCE(MAX(ts),'1900-01-01') FROM ocitanja_15min
+                    WHERE mjerno_mjesto=:m AND (kwh_plus>0 OR kwh_minus>0))
+    """, {'m': mjerno_mjesto})
     conn.commit()
     n_sat = conn.execute("SELECT COUNT(*) FROM ocitanja_satna WHERE mjerno_mjesto=?", (mjerno_mjesto,)).fetchone()[0]
     n_dan = conn.execute("SELECT COUNT(*) FROM ocitanja_dnevna WHERE mjerno_mjesto=?", (mjerno_mjesto,)).fetchone()[0]
