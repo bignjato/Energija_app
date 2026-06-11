@@ -41,6 +41,45 @@ def get_vt_udio() -> float:
     return 0.45
 
 
+def get_vt_udio_registri(conn):
+    """Sluzbeni VT udjeli iz HEP registara (delta mjesecnih stanja brojila).
+
+    Vraca (po_mjesecu, prosjek):
+      po_mjesecu: {'YYYY-MM': vt_udio 0-1} za svaki mjesec s oba stanja
+      prosjek:    potrosnjom vagani prosjek zadnja 3 mjeseca (ili None)
+    """
+    try:
+        rows = conn.execute(
+            "SELECT datum, obis, value FROM hep_registri "
+            "WHERE obis IN ('A+_T1','A+_T2') ORDER BY datum"
+        ).fetchall()
+    except Exception:
+        return {}, None
+    stanja = {}
+    for r in rows:
+        stanja.setdefault(r['datum'], {})[r['obis']] = r['value']
+    datumi = sorted(d for d, v in stanja.items()
+                    if v.get('A+_T1') is not None and v.get('A+_T2') is not None)
+    po_mjesecu = {}
+    delte = []
+    for prev, cur in zip(datumi, datumi[1:]):
+        dvt = stanja[cur]['A+_T1'] - stanja[prev]['A+_T1']
+        dnt = stanja[cur]['A+_T2'] - stanja[prev]['A+_T2']
+        uk = dvt + dnt
+        if dvt < 0 or dnt < 0 or uk <= 0:
+            continue  # zamjena brojila i sl.
+        po_mjesecu[cur[:7]] = dvt / uk
+        delte.append((dvt, uk))
+    prosjek = None
+    zadnje = delte[-3:]
+    if zadnje:
+        sum_vt = sum(d[0] for d in zadnje)
+        sum_uk = sum(d[1] for d in zadnje)
+        if sum_uk > 0:
+            prosjek = sum_vt / sum_uk
+    return po_mjesecu, prosjek
+
+
 def get_tariff_model() -> str:
     """Vrati 'bijeli' ili 'standardni' iz config-a."""
     return (get_config('TARIFA_MODEL', 'standardni') or 'standardni').lower()

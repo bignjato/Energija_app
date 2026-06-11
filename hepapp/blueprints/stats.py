@@ -288,15 +288,22 @@ def api_mjesecni():
             ORDER BY mjesec DESC
         ''').fetchall()
 
+        from ..tariff import get_vt_udio_registri
+        reg_udjeli, reg_prosjek = get_vt_udio_registri(conn)
+
         result = []
         for row in rows:
             r = dict(row)
             kp = r['hep_potrosnja'] or 0
             km = r['hep_predaja'] or 0
             n  = r['n_dana'] or 1
-            r['procj_racun'] = izracunaj_racun(kp, km, n)
+            # sluzbeni VT udio za taj mjesec iz registara; fallback slider/prosjek
+            vt_u = reg_udjeli.get(r['mjesec']) or reg_prosjek
+            r['vt_udio_registri'] = round(vt_u * 100, 1) if vt_u is not None else None
+            r['procj_racun'] = izracunaj_racun(kp, km, n, vt_udio=vt_u)
+            vt_eff = vt_u if vt_u is not None else 0.45
             r['procj_trosak_neto'] = round(
-                kp * (HEP_TARIFA['vt_opskrba'] * 0.45 + HEP_TARIFA['nt_opskrba'] * 0.55) -
+                kp * (HEP_TARIFA['vt_opskrba'] * vt_eff + HEP_TARIFA['nt_opskrba'] * (1 - vt_eff)) -
                 km * HEP_TARIFA['otkup'], 2)
             if has_sma:
                 sma = conn.execute('''
@@ -406,7 +413,17 @@ def api_procjena_trenutni():
     proj_km = round(km * faktor, 2)
 
     # Stvarni VT udio za sad
-    vt_udio_real = (kvt / kp) if kp > 0 else get_vt_udio()
+    if kp > 0:
+        vt_udio_real = kvt / kp
+    else:
+        # nema satnih podataka ovaj mjesec — probaj sluzbeni prosjek iz registara
+        from ..tariff import get_vt_udio_registri
+        conn2 = get_db()
+        try:
+            _, reg_prosjek = get_vt_udio_registri(conn2)
+        finally:
+            conn2.close()
+        vt_udio_real = reg_prosjek if reg_prosjek is not None else get_vt_udio()
 
     # Detekcija tarifnog modela
     model_str = (last_bill['model_tarife'] if last_bill else '') or ''
@@ -497,7 +514,14 @@ def api_cijene():
     t = HEP_TARIFA
     pretplata_opskrba = (row['pretplata'] if row else None) or t['opskrbna_mj']
     pretplata_mjerna  = (row['mjerna_mjernina'] if row else None) or t['mjerna_mj']
-    vt_udio = get_vt_udio()
+    from ..tariff import get_vt_udio_registri
+    conn = get_db()
+    try:
+        _, reg_prosjek = get_vt_udio_registri(conn)
+    finally:
+        conn.close()
+    vt_udio_izvor = 'registri (prosjek 3 mj)' if reg_prosjek is not None else 'slider'
+    vt_udio = reg_prosjek if reg_prosjek is not None else get_vt_udio()
 
     # Puna cijena VT/NT po kWh (uključujući sve sastavnice + PDV)
     vt_full = (t['vt_opskrba'] + t['vt_distrib'] + t['vt_prijenos']
@@ -524,6 +548,7 @@ def api_cijene():
         'vt_otkup':           t['vt_otkup'],
         'nt_otkup':           t['nt_otkup'],
         'vt_udio_perc':       round(vt_udio * 100, 1),
+        'vt_udio_izvor':      vt_udio_izvor,
         'vt_full_eur_kwh':    round(vt_full, 6),
         'nt_full_eur_kwh':    round(nt_full, 6),
         'avg_full_eur_kwh':   round(avg_full, 6),
