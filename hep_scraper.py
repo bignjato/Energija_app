@@ -56,6 +56,12 @@ def init_db(conn):
             ts TEXT DEFAULT (datetime('now')),
             tip TEXT, status TEXT, poruka TEXT, zapisi INTEGER DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS hep_registri (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mjerno_mjesto TEXT NOT NULL, datum TEXT NOT NULL,
+            obis TEXT NOT NULL, value REAL,
+            UNIQUE(mjerno_mjesto, datum, obis)
+        );
         CREATE INDEX IF NOT EXISTS idx_15min_ts ON ocitanja_15min(mjerno_mjesto, ts);
         CREATE INDEX IF NOT EXISTS idx_satna_ts ON ocitanja_satna(mjerno_mjesto, ts);
         CREATE INDEX IF NOT EXISTS idx_dnevna_ts ON ocitanja_dnevna(mjerno_mjesto, datum);
@@ -145,6 +151,25 @@ class HEPSession:
             log.error("Greska get_krivulje: %s", e)
             return []
 
+    def get_registri_mjesec(self, omm_sifra, mjesec_fmt):
+        """Sluzbena stanja brojila po tarifnim registrima na kraju mjeseca.
+
+        Format: [{"Sifra":"...","Obis":"REG: A+_T1","Datum":"2026-05-31T23:59:00","Value":"36239,9450"}]
+        204 No Content = mjesec jos nije zakljucen (tekuci).
+        """
+        url = f"{BASE_URL}/api/data/omm/{omm_sifra}/mjesec/{mjesec_fmt}/registri"
+        try:
+            r = self.session.post(url, timeout=30)
+            if r.status_code == 200 and r.content:
+                data = r.json()
+                if isinstance(data, list) and data:
+                    log.info("  %s registri: %d zapisa", mjesec_fmt, len(data))
+                    return data
+            return []
+        except Exception as e:
+            log.error("Greska get_registri: %s", e)
+            return []
+
 
 def spremi_mjerna_mjesta(conn, mjesta):
     for m in mjesta:
@@ -153,6 +178,23 @@ def spremi_mjerna_mjesta(conn, mjesta):
             (m["id"], m["naziv"], m["adresa"], m.get("oib",""), m["tip"], m.get("napon",""))
         )
     conn.commit()
+
+
+def spremi_registri(conn, podaci, mjerno_mjesto):
+    saved = 0
+    for row in podaci:
+        ts   = row.get("Datum") or ""
+        obis = (row.get("Obis") or "").replace("REG: ", "").strip()
+        val  = parse_vrijednost(row.get("Value"))
+        if not ts or not obis:
+            continue
+        conn.execute(
+            "INSERT OR REPLACE INTO hep_registri (mjerno_mjesto, datum, obis, value) VALUES (?,?,?,?)",
+            (mjerno_mjesto, ts[:10], obis, val)
+        )
+        saved += 1
+    conn.commit()
+    return saved
 
 
 def parse_vrijednost(v):
@@ -294,6 +336,23 @@ def sync(username=None, password=None, dani_unazad=7):
                 nm = spremi_krivulje(conn, krivulje_r, mid, je_minus=True)
                 log.info("  %s predaja (A-): %d zapisa", mj, nm)
                 total_saved += nm
+
+        # Registri: dohvati i 1 mjesec prije prvog (delta racun treba prethodno stanje)
+        reg_mjeseci = list(mieseci)
+        try:
+            mm, yy = mieseci[0].split(".")
+            mm, yy = int(mm), int(yy)
+            mm -= 1
+            if mm == 0:
+                mm, yy = 12, yy - 1
+            reg_mjeseci.insert(0, f"{mm:02d}.{yy}")
+        except Exception:
+            pass
+        for mj in reg_mjeseci:
+            registri = hep.get_registri_mjesec(mid, mj)
+            if registri:
+                nr = spremi_registri(conn, registri, mid)
+                log.info("  %s registri: %d spremljeno", mj, nr)
 
         n_sat, n_dan = agregacija(conn, mid)
         log.info("  Ukupno satna: %d, dnevna: %d", n_sat, n_dan)

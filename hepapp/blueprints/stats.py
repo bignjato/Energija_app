@@ -149,6 +149,71 @@ def api_usporedba():
 
 
 
+@bp.route('/registri')
+def api_registri():
+    """Sluzbena HEP stanja brojila po tarifnim registrima + mjesecne delte.
+
+    Registri: A+_T1 (potrosnja VT), A+_T2 (potrosnja NT),
+              A-_T1 (predaja VT),  A-_T2 (predaja NT).
+    Delta dva uzastopna mjesecna stanja = sluzbeni mjesecni kWh po tarifi.
+    """
+    conn = get_db()
+    try:
+        has_reg = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='hep_registri'"
+        ).fetchone() is not None
+        if not has_reg:
+            return jsonify({'stanja': [], 'mjeseci': []})
+
+        rows = conn.execute("""
+            SELECT datum, obis, value FROM hep_registri
+            ORDER BY datum, obis
+        """).fetchall()
+
+        # pivot: datum -> {obis: value}
+        stanja = {}
+        for r in rows:
+            stanja.setdefault(r['datum'], {})[r['obis']] = r['value']
+
+        datumi = sorted(stanja.keys())
+        out_stanja = [
+            {'datum': d, **{k.replace('+', 'p').replace('-', 'm'): v
+                            for k, v in stanja[d].items()}}
+            for d in datumi
+        ]
+
+        # mjesecne delte izmedju uzastopnih stanja
+        mjeseci = []
+        for prev, cur in zip(datumi, datumi[1:]):
+            s0, s1 = stanja[prev], stanja[cur]
+            def delta(key):
+                a, b = s0.get(key), s1.get(key)
+                if a is None or b is None:
+                    return None
+                d = round(b - a, 2)
+                return d if d >= 0 else None  # zamjena brojila i sl.
+            vt  = delta('A+_T1')
+            nt  = delta('A+_T2')
+            pvt = delta('A-_T1')
+            pnt = delta('A-_T2')
+            uk  = (vt or 0) + (nt or 0)
+            mjeseci.append({
+                'mjesec':       cur[:7],
+                'od': prev, 'do': cur,
+                'vt_kwh': vt, 'nt_kwh': nt,
+                'pred_vt_kwh': pvt, 'pred_nt_kwh': pnt,
+                'ukupno_kwh':  round(uk, 2) if (vt is not None or nt is not None) else None,
+                'predaja_kwh': round((pvt or 0) + (pnt or 0), 2)
+                               if (pvt is not None or pnt is not None) else None,
+                'vt_perc': round(100 * vt / uk, 1) if vt is not None and uk > 0 else None,
+            })
+        mjeseci.reverse()
+
+        return jsonify({'stanja': out_stanja, 'mjeseci': mjeseci})
+    finally:
+        conn.close()
+
+
 @bp.route('/optimalno')
 def api_optimalno():
     conn = get_db()

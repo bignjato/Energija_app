@@ -609,6 +609,23 @@ tr:hover td { background: var(--surface2); }
     </div>
   </div>
 
+  <!-- Službena stanja brojila (HEP registri) -->
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-title">🔢 Službeno stanje brojila — HEP registri (VT/NT po mjesecu)</div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">
+      Razlika dvaju uzastopnih mjesečnih stanja = službeni obračunski kWh. Točno ono što HEP fakturira.
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Mjesec</th><th>Potrošnja VT</th><th>Potrošnja NT</th><th>Ukupno</th>
+          <th>VT udio</th><th>Predaja VT</th><th>Predaja NT</th><th>Predaja uk.</th>
+        </tr></thead>
+        <tbody id="tRegistri"><tr><td colspan="8" class="c-muted" style="padding:14px;text-align:center">Učitavam…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
   <div class="cc">
     <h3>Procijenjeni račun po mjesecu</h3>
     <div class="sub">Na temelju HEP ODS podataka i stvarnih cijena · s PDV-om 13%</div>
@@ -1269,6 +1286,37 @@ async function loadRacuni(){
     window.RACUNI=await r.json();
     renderRacuni();
   }catch(e){console.error(e);}
+  loadRegistri();
+}
+
+async function loadRegistri(){
+  const tb=document.getElementById('tRegistri');
+  if(!tb) return;
+  try{
+    const r=await fetch('/api/stats/registri');
+    const d=await r.json();
+    const mj=d.mjeseci||[];
+    if(!mj.length){
+      tb.innerHTML='<tr><td colspan="8" class="c-muted" style="padding:14px;text-align:center">Nema registara — pokreni HEP sync (podaci se pune mjesečno)</td></tr>';
+      return;
+    }
+    tb.innerHTML='';
+    mj.forEach(m=>{
+      tb.innerHTML+=`<tr>
+        <td>${m.mjesec}</td>
+        <td class="c-consume">${f1(m.vt_kwh)}</td>
+        <td class="c-consume">${f1(m.nt_kwh)}</td>
+        <td><strong>${f1(m.ukupno_kwh)}</strong></td>
+        <td>${m.vt_perc!=null?f0(m.vt_perc)+'%':'—'}</td>
+        <td class="c-feed">${f1(m.pred_vt_kwh)}</td>
+        <td class="c-feed">${f1(m.pred_nt_kwh)}</td>
+        <td><strong>${f1(m.predaja_kwh)}</strong></td>
+      </tr>`;
+    });
+  }catch(e){
+    console.error(e);
+    tb.innerHTML='<tr><td colspan="8" class="c-muted" style="padding:14px;text-align:center">Greška pri učitavanju registara</td></tr>';
+  }
 }
 
 async function addRacun(){
