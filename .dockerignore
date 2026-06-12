@@ -12,4 +12,8 @@ backups/
 README.md
 CLAUDE.md
 deploy.sh
-=
+tests/
+.venv/
+.pytest_cache/
+requirements-dev.txt
+SESSION_NOTES.md

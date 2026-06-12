@@ -10,6 +10,7 @@ Funkcionalnosti:
 - 🎯 Auto-kalibracija VT/NT udjela iz vlastitih satnih podataka
 - ☀️ Integracija SMA Sunny Portal (PV inverter)
 - 🏠 Push senzora u Home Assistant
+- 🔔 HA alerti: stale podaci, anomalija potrošnje, podsjetnik za upload računa
 - 🔒 Login + admin/viewer uloge, PBKDF2 hashing, CSRF, rate-limit, HTTPS-ready
 
 ## Brzi start (Docker)
@@ -52,6 +53,7 @@ hepapp/
 ├── tariff.py          — HEP tarife, izračun računa
 ├── auth.py            — login/logout (BRAND_* env)
 ├── bill_parser.py     — HEP PDF parser (pdfplumber + regex)
+├── static/            — dashboard.css + dashboard.js (cache-busting preko ?v=)
 └── blueprints/
     ├── views.py       — / + /health
     ├── data.py        — /api/data, povijest, sma/live
@@ -66,8 +68,11 @@ hep_scraper.py         — HEP ODS scraper (15-min krivulje A+/A-)
 sma_scraper.py         — SMA Sunny Portal live scraper
 sma_history_import.py  — SMA history backfill
 ha_sender.py           — Home Assistant senzor push
+netutil.py             — HTTP retry/backoff + HA_VERIFY_SSL helper
+maintenance.py         — backfill, retencija, alerti (stale/anomalija/računi)
 sync_loop.sh           — orkestracija (SMA 5min, HEP+HA 1h, history 24h)
 offsite_backup.sh      — opcionalan upload na rclone/rsync remote
+tests/                 — pytest (bill parser, tarife, scraper, maintenance)
 ```
 
 ## Konfiguracija
@@ -122,13 +127,25 @@ Dnevni lokalni backup baze u `/data/backups/` (retencija 7). Za off-site (OneDri
 
 - PBKDF2-SHA256 password hashing (200k iter)
 - Session cookies: Secure, HttpOnly, SameSite=Lax
-- CSRF Origin check na POST/PUT/DELETE
+- CSRF: per-session token (X-CSRF-Token) + Origin check na POST/PUT/DELETE
 - Rate limit 10/min, 30/h na `/login` (flask-limiter)
 - HSTS + X-Frame-Options + X-Content-Type-Options + Referrer-Policy preko nginx-a
-- SQLite WAL mode + busy_timeout 5s
+- SSL verifikacija prema Home Assistantu (isključivo s `HA_VERIFY_SSL=0` za self-signed)
+- SQLite WAL mode + busy_timeout 5s; dnevni backup preko `sqlite3 .backup` (WAL-safe)
 - Non-root user (`app`) u kontejneru
 
 Nedostaje: 2FA/TOTP, audit log, K8s deployment manifest.
+
+## Testovi
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/
+
+# ili bez lokalnog Pythona:
+docker run --rm -v "$PWD":/app -w /app python:3.12-slim \
+  sh -c "pip install -q flask requests pytest && python -m pytest tests/ -q"
+```
 
 ## Tehnologije
 

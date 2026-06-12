@@ -43,6 +43,10 @@ docker exec hep-energy-sync python /app/hep_scraper.py --dani 7
 
 # DB shell
 docker exec -it hep-energy-web sqlite3 /data/hep_energy.db
+
+# Testovi (lokalno nema pip-a — koristi container)
+docker run --rm -v "$PWD":/app -w /app python:3.12-slim \
+  sh -c "pip install -q flask requests pytest && python -m pytest tests/ -q"
 ```
 
 ## Sigurnosne note
@@ -52,11 +56,12 @@ docker exec -it hep-energy-web sqlite3 /data/hep_energy.db
 - SECRET_KEY rotacija invalidira sve aktivne sesije — postavi jednom i drži.
 - Default admin lozinka `admin` mora se promijeniti odmah nakon prvog logina.
 - HEP_TOKEN / HA_TOKEN tokeni stari ≥90 dana — povremeno regeneriraj.
+- `HA_VERIFY_SSL` default je uključen — ako HA ima self-signed cert, postavi
+  `HA_VERIFY_SSL=0` u `.env` (inače HA push/pull pada na SSL grešci).
 
 ## Mogući sljedeći koraci
 
 - 2FA / TOTP za admin
 - Više brojila / multi-OMM selektor u UI
-- Anomaly detection (alarm ako trošak >X% iznad prosjeka)
 - Cumulative kWh chart u mjesecu
 - K8s deployment manifest

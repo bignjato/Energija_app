@@ -10,3 +10,7 @@ hep_energy.db
 *.bak.*
 .env.bak.*
 env
+
+# Dev
+.venv/
+.pytest_cache/
