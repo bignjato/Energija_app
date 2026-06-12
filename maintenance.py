@@ -9,6 +9,8 @@ Pokretanje:
   python /app/maintenance.py --normalize-ts
   python /app/maintenance.py --backfill-range 2026-01-05 2026-01-14
   python /app/maintenance.py --check-freshness
+  python /app/maintenance.py --check-anomaly
+  python /app/maintenance.py --bill-reminder
 """
 import os, sqlite3, logging, argparse, sys
 from datetime import datetime, timedelta, timezone
@@ -172,14 +174,48 @@ def backfill_range(conn, od, do):
     return total
 
 
-# ---------- 2. Alert na stale sync (preko HA) ----------
-def check_freshness(conn, max_hep_h=48, max_sma_h=12):
-    """Posalji HA notifikaciju ako HEP/SMA podaci kasne."""
+# ---------- HA notifikacije ----------
+def ha_notify(title, message):
+    """Posalji HA notifikaciju. Vraca True ako je poslana."""
     import requests
+    from netutil import ha_verify
     ha_url = os.environ.get('HA_URL', '').strip().rstrip('/')
     token  = os.environ.get('HA_TOKEN', '').strip()
     notify = os.environ.get('HA_NOTIFY_SERVICE', 'notify/persistent_notification')
+    if not ha_url or not token:
+        log.error('ha_notify: HA_URL/HA_TOKEN nisu postavljeni — preskacem notifikaciju')
+        return False
+    try:
+        r = requests.post(f'{ha_url}/api/services/{notify}',
+                          headers={'Authorization': f'Bearer {token}'},
+                          json={'title': title, 'message': message},
+                          timeout=15, verify=ha_verify())
+        log.info('ha_notify: %s -> %s', notify, r.status_code)
+        return r.ok
+    except Exception as e:
+        log.error('ha_notify greska: %s', e)
+        return False
 
+
+def _get_cfg(conn, key, default=''):
+    try:
+        row = conn.execute('SELECT value FROM config WHERE key=?', (key,)).fetchone()
+        return row['value'] if row else default
+    except sqlite3.Error:
+        return default
+
+
+def _set_cfg(conn, key, value):
+    conn.execute('CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT, '
+                 "updated TEXT DEFAULT (datetime('now')))")
+    conn.execute("INSERT OR REPLACE INTO config (key, value, updated) VALUES (?, ?, datetime('now'))",
+                 (key, value))
+    conn.commit()
+
+
+# ---------- 2. Alert na stale sync (preko HA) ----------
+def check_freshness(conn, max_hep_h=48, max_sma_h=12):
+    """Posalji HA notifikaciju ako HEP/SMA podaci kasne."""
     problemi = []
     hep = conn.execute('SELECT MAX(datum) d FROM ocitanja_dnevna').fetchone()['d']
     if hep:
@@ -204,17 +240,84 @@ def check_freshness(conn, max_hep_h=48, max_sma_h=12):
         return False
     poruka = 'Energetski Monitor — problemi:\n• ' + '\n• '.join(problemi)
     log.warning(poruka.replace('\n', ' | '))
-    if not ha_url or not token:
-        log.error('check_freshness: HA_URL/HA_TOKEN nisu postavljeni — preskacem notifikaciju')
-        return True
+    ha_notify('Energetski Monitor — alert', poruka)
+    return True
+
+
+# ---------- 3. Anomaly detection (potrosnja iznad prosjeka) ----------
+def check_anomaly(conn, threshold_perc=None, min_samples=3, min_avg_kwh=1.0):
+    """Alarm ako je potrosnja zadnjeg kompletnog dana >X% iznad prosjeka
+    istog dana u tjednu (zadnjih 8 tjedana). Notifikacija max jednom po datumu.
+    """
+    if threshold_perc is None:
+        try:
+            threshold_perc = float(os.environ.get('ANOMALY_THRESHOLD_PERC', '50'))
+        except ValueError:
+            threshold_perc = 50.0
+
+    zadnji = conn.execute(
+        'SELECT datum, ROUND(SUM(kwh_plus),2) kp FROM ocitanja_dnevna '
+        'GROUP BY datum ORDER BY datum DESC LIMIT 1').fetchone()
+    if not zadnji or not zadnji['kp']:
+        log.info('check_anomaly: nema dnevnih podataka')
+        return False
+    datum, kp = zadnji['datum'], zadnji['kp']
+
+    if _get_cfg(conn, '_anomaly_last_date') == datum:
+        log.info('check_anomaly: %s vec provjeren', datum)
+        return False
+
+    ref = conn.execute('''
+        SELECT AVG(kp) avg_kp, COUNT(*) n FROM (
+            SELECT datum, SUM(kwh_plus) kp FROM ocitanja_dnevna
+            WHERE datum < ? AND datum >= date(?, '-56 days')
+              AND strftime('%w', datum) = strftime('%w', ?)
+            GROUP BY datum
+        )
+    ''', (datum, datum, datum)).fetchone()
+    _set_cfg(conn, '_anomaly_last_date', datum)
+
+    if not ref or (ref['n'] or 0) < min_samples or (ref['avg_kp'] or 0) < min_avg_kwh:
+        log.info('check_anomaly: premalo referentnih dana (%s)', ref['n'] if ref else 0)
+        return False
+    avg = ref['avg_kp']
+    odstupanje = 100.0 * (kp - avg) / avg
+    log.info('check_anomaly: %s %.1f kWh vs prosjek %.1f kWh (%+.0f%%, prag +%.0f%%)',
+             datum, kp, avg, odstupanje, threshold_perc)
+    if odstupanje < threshold_perc:
+        return False
+    ha_notify('Energetski Monitor — anomalija potrosnje',
+              f'{datum}: potrosnja {kp:.1f} kWh je {odstupanje:.0f}% iznad prosjeka '
+              f'za taj dan u tjednu ({avg:.1f} kWh, zadnjih 8 tjedana).')
+    return True
+
+
+# ---------- 6. Podsjetnik za upload HEP racuna ----------
+def bill_reminder(conn, od_dana=10):
+    """Nakon `od_dana`. u mjesecu podsjeti (jednom mjesecno) ako racun za
+    prethodni mjesec jos nije unesen — vise racuna = bolja projekcija duga.
+    """
+    now = datetime.now()
+    if now.day < od_dana:
+        return False
+    prvi_ovaj_mj = now.replace(day=1)
+    prosli = prvi_ovaj_mj - timedelta(days=1)
+    period = f'{prosli.month:02d}/{prosli.year}'   # racuni.period format MM/YYYY
+
+    ovaj_mj = now.strftime('%Y-%m')
+    if _get_cfg(conn, '_bill_reminder_last') == ovaj_mj:
+        return False
     try:
-        r = requests.post(f'{ha_url}/api/services/{notify}',
-                          headers={'Authorization': f'Bearer {token}'},
-                          json={'title': 'Energetski Monitor — alert', 'message': poruka},
-                          timeout=15)
-        log.info('check_freshness: HA notify %s -> %s', notify, r.status_code)
-    except Exception as e:
-        log.error('check_freshness: HA notify greska: %s', e)
+        ima = conn.execute('SELECT 1 FROM racuni WHERE period=?', (period,)).fetchone()
+    except sqlite3.Error:
+        return False   # tablica jos ne postoji (svjezа instalacija)
+    if ima:
+        return False
+    _set_cfg(conn, '_bill_reminder_last', ovaj_mj)
+    ha_notify('Energetski Monitor — racun',
+              f'HEP racun za {period} jos nije unesen. Uploadaj PDF u Racuni tab — '
+              'projekcija duga je tocnija sa svakim racunom.')
+    log.info('bill_reminder: poslan podsjetnik za %s', period)
     return True
 
 
@@ -227,6 +330,8 @@ def main():
     ap.add_argument('--keep-days', type=int, default=30)
     ap.add_argument('--backfill-range', nargs=2, metavar=('OD', 'DO'))
     ap.add_argument('--check-freshness', action='store_true')
+    ap.add_argument('--check-anomaly', action='store_true')
+    ap.add_argument('--bill-reminder', action='store_true')
     a = ap.parse_args()
 
     conn = _conn()
@@ -241,8 +346,13 @@ def main():
             prune_live(conn, a.keep_days)
         if a.all or a.check_freshness:
             check_freshness(conn)
+        if a.all or a.check_anomaly:
+            check_anomaly(conn)
+        if a.all or a.bill_reminder:
+            bill_reminder(conn)
         if not any([a.all, a.backfill_daily, a.normalize_ts, a.prune_live,
-                    a.backfill_range, a.check_freshness]):
+                    a.backfill_range, a.check_freshness, a.check_anomaly,
+                    a.bill_reminder]):
             ap.print_help()
     finally:
         conn.close()

@@ -67,28 +67,36 @@ while true; do
         echo "[hourly] HEP + HA sync..." | tee -a "$LOG"
         run python /app/hep_scraper.py --dani 2
         run python /app/ha_sender.py
-        # backfill dnevnih SMA flow-metrika iz sma_live + alert na stale podatke
-        run python /app/maintenance.py --backfill-daily --check-freshness
+        # backfill dnevnih SMA flow-metrika + alert na stale podatke + anomalije
+        run python /app/maintenance.py --backfill-daily --check-freshness --check-anomaly
     fi
 
     # SMA history jednom dnevno (288 × 5min = 24h)
     if [ $((COUNTER % 288)) -eq 0 ]; then
         echo "[daily] SMA history import..." | tee -a "$LOG"
         sma_history
-        run python /app/maintenance.py --prune-live --keep-days 45
+        run python /app/maintenance.py --prune-live --keep-days 45 --bill-reminder
     fi
 
-    # Backup baze u 02:00 + off-site upload
-    HOUR=$(date +%H)
-    if [ $((COUNTER % 288)) -eq 144 ] && [ "$HOUR" = "02" ]; then
+    # Backup baze jednom dnevno nakon 02:00. Marker datoteka umjesto COUNTER
+    # faze — preživi restart kontejnera i ne ovisi o trenutku starta.
+    HOUR=$(date +%H); HOUR=${HOUR#0}
+    TODAY=$(date +%Y-%m-%d)
+    LAST_BACKUP=$(cat /data/.last_backup_date 2>/dev/null)
+    if [ "${HOUR:-0}" -ge 2 ] && [ "$LAST_BACKUP" != "$TODAY" ]; then
         BACKUP_DIR=/data/backups
         mkdir -p $BACKUP_DIR
         DATUM=$(date +%Y%m%d_%H%M)
-        cp /data/hep_energy.db $BACKUP_DIR/hep_energy_$DATUM.db
-        ls -t $BACKUP_DIR/*.db | tail -n +8 | xargs rm -f 2>/dev/null
-        echo "[backup] $BACKUP_DIR/hep_energy_$DATUM.db" | tee -a "$LOG"
+        # sqlite3 .backup je konzistentan uz aktivan WAL (cp nije)
+        if sqlite3 /data/hep_energy.db ".backup '$BACKUP_DIR/hep_energy_$DATUM.db'"; then
+            echo "$TODAY" > /data/.last_backup_date
+            ls -t $BACKUP_DIR/*.db | tail -n +8 | xargs rm -f 2>/dev/null
+            echo "[backup] $BACKUP_DIR/hep_energy_$DATUM.db" | tee -a "$LOG"
 
-        # Off-site upload (rclone ili rsync) — best effort, ne ruši loop
-        /bin/sh /app/offsite_backup.sh || echo "[offsite] failed (ignored)" | tee -a "$LOG"
+            # Off-site upload (rclone ili rsync) — best effort, ne ruši loop
+            /bin/sh /app/offsite_backup.sh || echo "[offsite] failed (ignored)" | tee -a "$LOG"
+        else
+            echo "[backup] sqlite3 .backup NEUSPJESAN" | tee -a "$LOG"
+        fi
     fi
 done
