@@ -10,8 +10,20 @@ TEMPLATE_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     'dashboard_template.html',
 )
+STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'static')
 
 _DASHBOARD_CACHE = None
+
+
+def _asset_version() -> str:
+    """Cache-busting verzija za /static linkove (mtime datoteka)."""
+    v = 0
+    for rel in ('css/dashboard.css', 'js/dashboard.js'):
+        try:
+            v = max(v, int(os.path.getmtime(os.path.join(STATIC_DIR, rel))))
+        except OSError:
+            pass
+    return str(v)
 
 
 def _brand_tokens() -> dict:
@@ -65,7 +77,9 @@ def _get_dashboard() -> str:
     if _DASHBOARD_CACHE is None:
         with open(TEMPLATE_PATH, 'r', encoding='utf-8') as f:
             html = f.read()
-        for k, v in _brand_tokens().items():
+        tokens = _brand_tokens()
+        tokens['ASSET_V'] = _asset_version()
+        for k, v in tokens.items():
             html = html.replace('{{' + k + '}}', v)
         _DASHBOARD_CACHE = html
     return _DASHBOARD_CACHE

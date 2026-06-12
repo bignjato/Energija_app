@@ -8,20 +8,20 @@ from ..tariff import HEP_TARIFA, izracunaj_racun
 bp = Blueprint('stats', __name__, url_prefix='/api/stats')
 
 
+def _table_exists(conn, name: str) -> bool:
+    return conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone() is not None
+
+
 @bp.route('/usporedba')
 def api_usporedba():
     from datetime import datetime as _dt
     conn = get_db()
     try:
-        has_sma_dnevna = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='sma_dnevna'"
-        ).fetchone() is not None
-        has_sma_15min = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='sma_15min'"
-        ).fetchone() is not None
-        has_sma_live = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='sma_live'"
-        ).fetchone() is not None
+        has_sma_dnevna = _table_exists(conn, 'sma_dnevna')
+        has_sma_15min  = _table_exists(conn, 'sma_15min')
+        has_sma_live   = _table_exists(conn, 'sma_live')
 
         if has_sma_dnevna:
             # UNION datuma -> red postoji ako BILO KOJA tablica ima taj datum
@@ -159,10 +159,7 @@ def api_registri():
     """
     conn = get_db()
     try:
-        has_reg = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='hep_registri'"
-        ).fetchone() is not None
-        if not has_reg:
+        if not _table_exists(conn, 'hep_registri'):
             return jsonify({'stanja': [], 'mjeseci': []})
 
         rows = conn.execute("""
@@ -325,9 +322,7 @@ def api_dug():
 def api_optimalno():
     conn = get_db()
     try:
-        has_sma = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='sma_live'"
-        ).fetchone() is not None
+        has_sma = _table_exists(conn, 'sma_live')
 
         hep_satno = conn.execute('''
             SELECT CAST(strftime('%H', ts) AS INTEGER) as sat,
@@ -341,9 +336,7 @@ def api_optimalno():
         ''').fetchall()
 
         sma_satno = []
-        has_15min = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='sma_15min'"
-        ).fetchone() is not None
+        has_15min = _table_exists(conn, 'sma_15min')
         if has_15min:
             sma_satno = conn.execute('''
                 SELECT CAST(strftime('%H', ts) AS INTEGER) as sat,
@@ -380,9 +373,7 @@ def api_optimalno():
 def api_mjesecni():
     conn = get_db()
     try:
-        has_sma = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='sma_dnevna'"
-        ).fetchone() is not None
+        has_sma = _table_exists(conn, 'sma_dnevna')
 
         rows = conn.execute('''
             SELECT substr(h.datum,1,7) as mjesec,
@@ -397,6 +388,18 @@ def api_mjesecni():
 
         from ..tariff import get_vt_udio_registri
         reg_udjeli, reg_prosjek = get_vt_udio_registri(conn)
+
+        # SMA agregati za sve mjesece odjednom (umjesto upita po mjesecu)
+        sma_po_mj = {}
+        if has_sma:
+            for s in conn.execute('''
+                SELECT substr(datum,1,7) as mjesec,
+                       ROUND(SUM(pv_generation_kwh),2) as pv,
+                       ROUND(AVG(autarky_rate)*100,1) as autarkija
+                FROM sma_dnevna
+                GROUP BY substr(datum,1,7)
+            ''').fetchall():
+                sma_po_mj[s['mjesec']] = s
 
         result = []
         for row in rows:
@@ -413,11 +416,7 @@ def api_mjesecni():
                 kp * (HEP_TARIFA['vt_opskrba'] * vt_eff + HEP_TARIFA['nt_opskrba'] * (1 - vt_eff)) -
                 km * HEP_TARIFA['otkup'], 2)
             if has_sma:
-                sma = conn.execute('''
-                    SELECT ROUND(SUM(pv_generation_kwh),2) as pv,
-                           ROUND(AVG(autarky_rate)*100,1) as autarkija
-                    FROM sma_dnevna WHERE substr(datum,1,7)=?
-                ''', (r['mjesec'],)).fetchone()
+                sma = sma_po_mj.get(r['mjesec'])
                 r['sma_pv']        = sma['pv'] if sma else None
                 r['sma_autarkija'] = sma['autarkija'] if sma else None
             result.append(r)
@@ -492,6 +491,15 @@ def api_procjena_trenutni():
             WHERE pretplata IS NOT NULL OR model_tarife IS NOT NULL
             ORDER BY datum_racuna DESC LIMIT 1
         ''').fetchone()
+
+        # Stvarni VT udio za sad (registri fallback ide istom konekcijom)
+        if (row['kwh_plus'] or 0) > 0:
+            vt_udio_real = (row['kwh_vt'] or 0) / row['kwh_plus']
+        else:
+            # nema satnih podataka ovaj mjesec — probaj sluzbeni prosjek iz registara
+            from ..tariff import get_vt_udio_registri
+            _, reg_prosjek = get_vt_udio_registri(conn)
+            vt_udio_real = reg_prosjek if reg_prosjek is not None else get_vt_udio()
     finally:
         conn.close()
 
@@ -518,19 +526,6 @@ def api_procjena_trenutni():
     faktor = n_dana_mj / dani_s_podacima
     proj_kp = round(kp * faktor, 2)
     proj_km = round(km * faktor, 2)
-
-    # Stvarni VT udio za sad
-    if kp > 0:
-        vt_udio_real = kvt / kp
-    else:
-        # nema satnih podataka ovaj mjesec — probaj sluzbeni prosjek iz registara
-        from ..tariff import get_vt_udio_registri
-        conn2 = get_db()
-        try:
-            _, reg_prosjek = get_vt_udio_registri(conn2)
-        finally:
-            conn2.close()
-        vt_udio_real = reg_prosjek if reg_prosjek is not None else get_vt_udio()
 
     # Detekcija tarifnog modela
     model_str = (last_bill['model_tarife'] if last_bill else '') or ''
@@ -606,7 +601,7 @@ def api_cijene():
       2. HEP_TARIFA konstante (VT/NT/distrib/prijenos/solidarna/oie/PDV/otkup)
       3. VT_UDIO_PERC iz config-a
     """
-    from ..tariff import HEP_TARIFA, get_vt_udio
+    from ..tariff import HEP_TARIFA, get_vt_udio, get_vt_udio_registri
     conn = get_db()
     try:
         row = conn.execute('''
@@ -615,18 +610,13 @@ def api_cijene():
             WHERE pretplata IS NOT NULL OR mjerna_mjernina IS NOT NULL
             ORDER BY datum_racuna DESC, period DESC LIMIT 1
         ''').fetchone()
+        _, reg_prosjek = get_vt_udio_registri(conn)
     finally:
         conn.close()
 
     t = HEP_TARIFA
     pretplata_opskrba = (row['pretplata'] if row else None) or t['opskrbna_mj']
     pretplata_mjerna  = (row['mjerna_mjernina'] if row else None) or t['mjerna_mj']
-    from ..tariff import get_vt_udio_registri
-    conn = get_db()
-    try:
-        _, reg_prosjek = get_vt_udio_registri(conn)
-    finally:
-        conn.close()
     vt_udio_izvor = 'registri (prosjek 3 mj)' if reg_prosjek is not None else 'slider'
     vt_udio = reg_prosjek if reg_prosjek is not None else get_vt_udio()
 
@@ -694,9 +684,9 @@ def api_weather():
 @bp.route('/power-limit-history')
 def api_power_limit_history():
     """24h history inverter power limit-a iz HA."""
-    import os, requests, urllib3
+    import os, requests
     from datetime import datetime, timedelta
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    from netutil import ha_verify
 
     ent = get_config('HA_ENT_POWER_LIMIT', '')
     if not ent:
@@ -712,7 +702,7 @@ def api_power_limit_history():
             f"{ha_url.rstrip('/')}/api/history/period/{start}",
             headers={'Authorization': f'Bearer {ha_tok}'},
             params={'filter_entity_id': ent, 'minimal_response': 'true'},
-            timeout=15, verify=False,
+            timeout=15, verify=ha_verify(),
         )
         if r.status_code != 200:
             return jsonify({'series': [], 'note': f'HA HTTP {r.status_code}'})
@@ -749,8 +739,8 @@ def api_plant_info():
     """
     from datetime import datetime
     from ..tariff import HEP_TARIFA
-    import os, requests, urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    import os, requests
+    from netutil import ha_verify
 
     nominal_kw     = float(get_config('PV_NOMINAL_KW', '0') or 0)
     commission     = get_config('PV_COMMISSION_DATE', '')
@@ -801,7 +791,7 @@ def api_plant_info():
                 r = requests.get(
                     f"{ha_url.rstrip('/')}/api/states/{power_limit_ent}",
                     headers={'Authorization': f'Bearer {ha_tok}'},
-                    timeout=8, verify=False,
+                    timeout=8, verify=ha_verify(),
                 )
                 if r.status_code == 200:
                     state = r.json().get('state')
