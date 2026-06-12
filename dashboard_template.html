@@ -193,6 +193,7 @@ tr:hover td { background: var(--surface2); }
   <div class="tab" onclick="goTo('usporedba',this)">HEP vs SMA</div>
   <div class="tab" onclick="goTo('financije',this)">Financije</div>
   <div class="tab" onclick="goTo('racuni',this)">Računi</div>
+  <div class="tab" onclick="goTo('dug',this)">Dug</div>
   <div class="tab" onclick="goTo('optimalno',this)">Optimalno</div>
   <div class="tab" onclick="goTo('povijest',this)">Povijest</div>
   <div class="tab" onclick="goTo('postavke',this)">⚙️ Postavke</div>
@@ -426,7 +427,7 @@ tr:hover td { background: var(--surface2); }
     <h3>⚡ Aktivne tarife</h3>
     <div style="font-size:13px;color:var(--muted);margin-bottom:10px">
       Cijene i tarifni model dolaze iz HEP-a + tvojih postavki. Za promjene idi u
-      <a href="#" onclick="event.preventDefault();goTo('postavke',document.querySelectorAll('.tab')[6])" style="color:var(--accent)">Postavke → Tarifa</a>.
+      <a href="#" onclick="event.preventDefault();goTo('postavke',document.querySelectorAll('.tab')[7])" style="color:var(--accent)">Postavke → Tarifa</a>.
     </div>
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px" id="cijene-info">
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
@@ -642,6 +643,84 @@ tr:hover td { background: var(--surface2); }
           <th>Procj. račun</th><th>Stvarni račun</th><th>Razlika</th>
         </tr></thead>
         <tbody id="tRacuni"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div></div>
+
+<!-- ============ DUG ============ -->
+<div id="page-dug" class="page"><div class="wrap">
+
+  <div class="kpi-strip">
+    <div class="kpi cons"><div class="kpi-lbl">Trenutni dug</div><div class="kpi-val" id="dug-trenutni">—</div><div class="kpi-sub" id="dug-datum"></div></div>
+    <div class="kpi acc"><div class="kpi-lbl">Vrh duga</div><div class="kpi-val" id="dug-vrh">—</div><div class="kpi-sub" id="dug-vrh-mj"></div></div>
+    <div class="kpi grn"><div class="kpi-lbl">Pad od vrha</div><div class="kpi-val" id="dug-pad">—</div><div class="kpi-sub">do zadnjeg računa</div></div>
+    <div class="kpi solar"><div class="kpi-lbl">Prosj. mj. trošak struje</div><div class="kpi-val" id="dug-mjtrosak">—</div><div class="kpi-sub">godišnje ÷ 12</div></div>
+  </div>
+
+  <!-- Projekcija isplate -->
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-title">📉 Projekcija isplate duga</div>
+    <div style="font-size:13px;color:var(--muted);margin-bottom:12px">
+      Simulacija uzima sezonski obrazac troška struje iz tvojih mjernih podataka
+      (zima skupa, ljeto u plusu) i tvoju mjesečnu uplatu. Pomakni klizač da vidiš
+      kada se dug gasi.
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+      <label style="font-size:13px;color:var(--muted);min-width:130px">Mjesečna uplata</label>
+      <input type="range" id="dug-uplata" min="0" max="400" step="10" value="170" style="flex:1;min-width:180px" oninput="renderDugProj()">
+      <span id="dug-uplata-val" style="font-family:var(--mono);font-size:15px;min-width:80px;text-align:right">170 €</span>
+    </div>
+    <div class="g-auto" style="margin:10px 0 14px">
+      <div class="kpi"><div class="kpi-lbl">Pri trenutnom tempu</div><div class="kpi-val" id="dug-tempo" style="font-size:18px">—</div><div class="kpi-sub" id="dug-tempo-sub">samo ljetni pad</div></div>
+      <div class="kpi"><div class="kpi-lbl">Sezonska projekcija</div><div class="kpi-val" id="dug-sezproj" style="font-size:18px">—</div><div class="kpi-sub">uz odabranu uplatu</div></div>
+      <div class="kpi"><div class="kpi-lbl">Točka pokrića</div><div class="kpi-val" id="dug-breakeven" style="font-size:18px">—</div><div class="kpi-sub">min. uplata da dug pada</div></div>
+    </div>
+    <div class="cw h280"><canvas id="cDug"></canvas></div>
+  </div>
+
+  <!-- Cijene oba smjera -->
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-title">⚡ Cijena po kWh — kupnja vs otkup</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px">
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Kupnja VT (viša)</div>
+        <div style="font-size:18px;color:#f87171;font-family:var(--mono)" id="dug-c-vt-buy">—</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Kupnja NT (niža)</div>
+        <div style="font-size:18px;color:#f87171;font-family:var(--mono)" id="dug-c-nt-buy">—</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Kupnja prosjek</div>
+        <div style="font-size:18px;color:#fbbf24;font-family:var(--mono)" id="dug-c-avg-buy">—</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Otkup VT viška</div>
+        <div style="font-size:18px;color:#22c55e;font-family:var(--mono)" id="dug-c-vt-sell">—</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Otkup NT viška</div>
+        <div style="font-size:18px;color:#22c55e;font-family:var(--mono)" id="dug-c-nt-sell">—</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Pretplata (fiksno)</div>
+        <div style="font-size:18px;color:var(--muted);font-family:var(--mono)" id="dug-c-pretplata">—</div>
+      </div>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin-top:10px" id="dug-asimetrija"></div>
+  </div>
+
+  <!-- Povijest duga -->
+  <div class="card">
+    <div class="card-title">Povijest duga po računima</div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Razdoblje</th><th>Iznos računa</th><th>Dug</th><th>Δ dug</th><th>Dospijeće</th>
+        </tr></thead>
+        <tbody id="tDug"></tbody>
       </table>
     </div>
   </div>
@@ -975,6 +1054,7 @@ function goTo(name,el){
   if(name==='usporedba') renderUsporedba();
   if(name==='financije') { renderFin(); loadVtNtTrosak(); loadHepStanje(); loadProcjenaTrenutni(); }
   if(name==='racuni'&&!window.RACUNI) loadRacuni();
+  if(name==='dug') loadDug();
   if(name==='optimalno'&&!OPT) loadOpt();
   if(name==='povijest'&&!POV) { brziIzbor('30dana'); }
   if(name==='postavke') { loadPostavke(); loadOmmInfo(); }
@@ -1805,6 +1885,127 @@ async function loadUsporedba(){
 }
 
 // ---- CHART FACTORY ----
+// ---- DUG ----
+window.DUG = null;
+async function loadDug(){
+  try{
+    const r = await fetch('/api/stats/dug');
+    window.DUG = await r.json();
+    renderDug();
+  }catch(e){ console.error(e); }
+}
+
+function renderDug(){
+  const D2 = window.DUG;
+  if(!D2 || !D2.trenutni){ return; }
+  const t = D2.trenutni, v = D2.vrh, c = D2.cijene;
+  set('dug-trenutni', eur(t.dug));
+  set('dug-datum', (t.datum_racuna||t.period||'') + ' · račun ' + eur(t.iznos));
+  set('dug-vrh', eur(v.dug));
+  set('dug-vrh-mj', v.period);
+  set('dug-pad', eur(t.dug - v.dug));
+  const avgCharge = D2.godisnji_neto!=null ? D2.godisnji_neto/12 : null;
+  set('dug-mjtrosak', avgCharge!=null ? eur(avgCharge) : '—');
+
+  // cijene
+  set('dug-c-vt-buy',  (c.vt_kupnja*100).toFixed(2)+' c');
+  set('dug-c-nt-buy',  (c.nt_kupnja*100).toFixed(2)+' c');
+  set('dug-c-avg-buy', (c.avg_kupnja*100).toFixed(2)+' c');
+  set('dug-c-vt-sell', (c.vt_otkup*100).toFixed(2)+' c');
+  set('dug-c-nt-sell', (c.nt_otkup*100).toFixed(2)+' c');
+  set('dug-c-pretplata', eur(c.pretplata)+'/mj');
+  const ratio = c.vt_otkup>0 ? (c.vt_kupnja/c.vt_otkup) : 0;
+  set('dug-asimetrija',
+    `Kupnja VT je ${ratio.toFixed(1)}× skuplja od otkupa VT viška — svaki kWh potrošen iz mreže vrijedi puno više nego predan. Isplati se trošiti dok sunce proizvodi.`);
+
+  // breakeven
+  set('dug-breakeven', avgCharge!=null ? eur(avgCharge)+'/mj' : '—');
+
+  // tempo (samo post-vrh pad iz stvarnih računa)
+  const rac = D2.racuni||[];
+  let tempo = null;
+  const iVrh = rac.findIndex(x=>x.period===v.period);
+  if(iVrh>=0 && iVrh < rac.length-1){
+    const a = rac[iVrh], b = rac[rac.length-1];
+    const mj = _mjeseciIzmedju(a.period, b.period);
+    if(mj>0){ tempo = (b.dug - a.dug)/mj; }
+  }
+  if(tempo!=null && tempo<0){
+    const mjeseci = Math.ceil(t.dug / (-tempo));
+    set('dug-tempo', _datumZaMjeseci(t.period, mjeseci));
+    set('dug-tempo-sub', `~${(-tempo).toFixed(0)} €/mj (ljetni tempo)`);
+  } else {
+    set('dug-tempo', '—');
+    set('dug-tempo-sub', 'nema pada');
+  }
+
+  // postavi default uplatu na razumnu (pokriće + isplata u ~24 mj)
+  if(avgCharge!=null){
+    const sug = Math.ceil((avgCharge + t.dug/24)/10)*10;
+    const sl = document.getElementById('dug-uplata');
+    sl.value = Math.min(400, Math.max(0, sug));
+  }
+  renderDugProj();
+}
+
+function _mjeseciIzmedju(p1, p2){
+  const [y1,m1]=p1.split('-').map(Number), [y2,m2]=p2.split('-').map(Number);
+  return (y2-y1)*12 + (m2-m1);
+}
+function _datumZaMjeseci(period, n){
+  let [y,m]=period.split('-').map(Number);
+  m += n;
+  y += Math.floor((m-1)/12);
+  m = ((m-1)%12)+1;
+  const naz=['sij','velj','ožu','tra','svi','lip','srp','kol','ruj','lis','stu','pro'];
+  return naz[m-1]+' '+y;
+}
+
+function renderDugProj(){
+  const D2 = window.DUG;
+  if(!D2 || !D2.trenutni) return;
+  const uplata = +document.getElementById('dug-uplata').value;
+  set('dug-uplata-val', uplata+' €');
+  const sez = D2.sezonski || {};
+  const t = D2.trenutni;
+  let [y,m] = t.period.split('-').map(Number);
+
+  // simulacija unaprijed (max 60 mj)
+  const labels = [], dataProj = [];
+  let dug = t.dug, isplata = null;
+  const naz=['sij','velj','ožu','tra','svi','lip','srp','kol','ruj','lis','stu','pro'];
+  for(let k=1; k<=60; k++){
+    m++; if(m>12){ m=1; y++; }
+    const charge = sez[m] != null ? sez[m] : (D2.godisnji_neto||0)/12;
+    dug = dug + charge - uplata;
+    labels.push(naz[m-1]+' '+String(y).slice(2));
+    dataProj.push(Math.max(0, +dug.toFixed(2)));
+    if(dug<=0 && isplata===null){ isplata = k; break; }
+    if(k>=36 && dug > t.dug){ break; }  // raste — nema isplate
+  }
+  if(isplata!=null){
+    set('dug-sezproj', _datumZaMjeseci(t.period, isplata));
+  } else {
+    set('dug-sezproj', 'ne gasi se');
+  }
+
+  // graf: stvarni dug (povijest) + projekcija
+  const rac = D2.racuni||[];
+  const histLabels = rac.map(x=>{ const [yy,mm]=x.period.split('-'); return naz[+mm-1]+' '+yy.slice(2); });
+  const histData = rac.map(x=>x.dug);
+  const allLabels = histLabels.concat(labels);
+  const histPadded = histData.concat(labels.map(()=>null));
+  const projPadded = histData.map(()=>null);
+  // poveži zadnji stvarni s prvom projekcijom
+  if(histData.length){ projPadded[histData.length-1] = histData[histData.length-1]; }
+  const projFull = projPadded.concat(dataProj);
+
+  mkChart('cDug','line',allLabels,[
+    {label:'Stvarni dug', data:histPadded.concat(), borderColor:'#f87171', backgroundColor:'rgba(248,113,113,.08)', fill:true, tension:.2, pointRadius:3, borderWidth:2, spanGaps:false},
+    {label:'Projekcija', data:projFull, borderColor:'#38bdf8', borderDash:[5,3], fill:false, tension:.2, pointRadius:0, borderWidth:2, spanGaps:true},
+  ],'€');
+}
+
 function mkChart(id,type,labels,datasets,unit){
   if(CH[id])CH[id].destroy();
   const isDark=document.documentElement.getAttribute('data-theme')!=='light';

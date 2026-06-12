@@ -214,6 +214,113 @@ def api_registri():
         conn.close()
 
 
+@bp.route('/dug')
+def api_dug():
+    """Dug prema HEP-u + sezonska projekcija isplate + cijene u oba smjera."""
+    from ..tariff import HEP_TARIFA, get_vt_udio_registri
+    conn = get_db()
+    try:
+        racuni = [dict(r) for r in conn.execute(
+            "SELECT period, iznos, dug, datum_racuna, datum_dospijeca "
+            "FROM racuni WHERE dug IS NOT NULL ORDER BY period"
+        ).fetchall()]
+
+        trenutni = racuni[-1] if racuni else None
+        vrh = max(racuni, key=lambda r: r["dug"]) if racuni else None
+
+        pace = None
+        if len(racuni) >= 2:
+            zadnji = racuni[-4:]
+            delte = [b["dug"] - a["dug"] for a, b in zip(zadnji, zadnji[1:])]
+            if delte:
+                pace = round(sum(delte) / len(delte), 2)
+
+        reg_udjeli, reg_prosjek = get_vt_udio_registri(conn)
+
+        # Detekcija tarifnog modela iz zadnjeg racuna
+        modr = conn.execute(
+            "SELECT model_tarife FROM racuni WHERE model_tarife IS NOT NULL "
+            "ORDER BY period DESC LIMIT 1").fetchone()
+        model = (modr["model_tarife"] if modr else "") or ""
+        is_bijeli = "bijeli" in model.lower() or "BIJ" in model.upper()
+
+        po_kal = {}
+        sezonski_izvor = "standardni"
+        if is_bijeli:
+            # Tocan bijeli net-metering racun iz delta registara (stanja brojila)
+            from ..tariff import izracunaj_racun_bijeli
+            reg = conn.execute(
+                "SELECT datum, obis, value FROM hep_registri "
+                "WHERE obis IN ('A+_T1','A+_T2','A-_T1','A-_T2') ORDER BY datum"
+            ).fetchall()
+            stanja = {}
+            for rr in reg:
+                stanja.setdefault(rr["datum"], {})[rr["obis"]] = rr["value"]
+            datumi = sorted(stanja.keys())
+            for prev, cur in zip(datumi, datumi[1:]):
+                s0, s1 = stanja[prev], stanja[cur]
+                def d(k):
+                    a, b = s0.get(k), s1.get(k)
+                    return (b - a) if (a is not None and b is not None and b >= a) else None
+                vt_p, nt_p = d("A+_T1"), d("A+_T2")
+                vt_pr, nt_pr = d("A-_T1"), d("A-_T2")
+                if vt_p is None or nt_p is None:
+                    continue
+                racun = izracunaj_racun_bijeli(vt_p, nt_p, vt_pr or 0, nt_pr or 0, 30)
+                mes = int(cur[5:7])
+                po_kal.setdefault(mes, []).append(racun["iznos"])
+            if po_kal:
+                sezonski_izvor = "bijeli (registri)"
+
+        if not po_kal:
+            # Fallback: standardni model iz dnevnih ocitanja
+            rows = conn.execute(
+                "SELECT substr(datum,1,7) mj, ROUND(SUM(kwh_plus),2) kp, "
+                "ROUND(SUM(kwh_minus),2) km, COUNT(*) n "
+                "FROM ocitanja_dnevna WHERE datum >= date('now','-24 months') "
+                "GROUP BY substr(datum,1,7)"
+            ).fetchall()
+            for r in rows:
+                if (r["n"] or 0) < 20:
+                    continue
+                mes = int(r["mj"][5:7])
+                vt_u = reg_udjeli.get(r["mj"]) or reg_prosjek
+                cost = izracunaj_racun(r["kp"] or 0, r["km"] or 0, r["n"], vt_udio=vt_u)
+                po_kal.setdefault(mes, []).append(cost)
+
+        sezonski = {m: round(sum(v) / len(v), 2) for m, v in po_kal.items()}
+        godisnji_neto = round(sum(sezonski.values()), 2) if len(sezonski) == 12 else None
+
+        t = HEP_TARIFA
+        pdv = 1 + t["pdv"]
+        vt_buy = (t["vt_opskrba"] + t["vt_distrib"] + t["vt_prijenos"] + t["solidarna"] + t["oie"]) * pdv
+        nt_buy = (t["nt_opskrba"] + t["nt_distrib"] + t["nt_prijenos"] + t["solidarna"] + t["oie"]) * pdv
+        vt_udio = reg_prosjek if reg_prosjek is not None else 0.45
+        cijene = {
+            "vt_kupnja":  round(vt_buy, 4),
+            "nt_kupnja":  round(nt_buy, 4),
+            "avg_kupnja": round(vt_buy * vt_udio + nt_buy * (1 - vt_udio), 4),
+            "vt_otkup":   t["vt_otkup"],
+            "nt_otkup":   t["nt_otkup"],
+            "otkup":      t["otkup"],
+            "pretplata":  round(t["opskrbna_mj"] + t["mjerna_mj"], 3),
+            "vt_udio":    round(vt_udio * 100, 1),
+        }
+
+        return jsonify({
+            "racuni":        racuni,
+            "trenutni":      trenutni,
+            "vrh":           vrh,
+            "pace":          pace,
+            "sezonski":      sezonski,
+            "godisnji_neto": godisnji_neto,
+            "sezonski_izvor": sezonski_izvor,
+            "cijene":        cijene,
+        })
+    finally:
+        conn.close()
+
+
 @bp.route('/optimalno')
 def api_optimalno():
     conn = get_db()
