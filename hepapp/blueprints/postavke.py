@@ -82,6 +82,13 @@ def api_postavke():
         for k in keys:
             v = existing.get(k, '')
             lines.append(f'{k}={v}\n')
+    # Sacuvaj i kljuceve koje UI ne poznaje (SMA_USE_API, OFFSITE_*, BRAND_*...)
+    poznati = {k for keys in sections.values() for k in keys}
+    ostali = [k for k in existing if k not in poznati]
+    if ostali:
+        lines.append('\n# OSTALO (izvan UI postavki)\n')
+        for k in sorted(ostali):
+            lines.append(f'{k}={existing[k]}\n')
     with open(env_path, 'w') as f:
         f.writelines(lines)
     try:

@@ -155,12 +155,13 @@ def parse_hep_bill(text: str) -> dict:
     # "Ukupan iznos za opskrbu  49,18"
     # ili "Ukupni iznos za opskrbu   49,18 €"
     res['opskrba'] = _to_float(_search([
-        r'Ukupa?n\s+iznos\s+za\s+opskrbu\s+([\d\.,]+)',
+        r'Ukup(?:an|ni)\s+iznos\s+za\s+opskrbu\s+([\d\.,]+)',
     ], text))
 
     # --- MREŽA (ukupno) ---
+    # "Ukupni iznos za korištenje mreže i usluga 19,80 €"
     res['mreza'] = _to_float(_search([
-        r'Ukupa?n\s+iznos\s+za\s+kori[šs]tenje\s+mre[žz]e(?:\s+i\s+usluga)?\s+([\d\.,]+)',
+        r'Ukup(?:an|ni)\s+iznos\s+za\s+kori[šs]tenje\s+mre[žz]e(?:\s+i\s+usluga)?\s+([\d\.,]+)',
     ], text))
 
     # --- PDV ---
