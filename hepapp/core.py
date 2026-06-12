@@ -21,6 +21,8 @@ def init_limiter(app):
     try:
         from flask_limiter import Limiter
         from flask_limiter.util import get_remote_address
+        # memory:// brojaci su per-gunicorn-worker (-w 2 => efektivni limit x2).
+        # Svjesno prihvaceno: i dvostruki login limit je dovoljno restriktivan.
         limiter = Limiter(
             app=app, key_func=get_remote_address,
             default_limits=[], storage_uri='memory://',
@@ -87,6 +89,12 @@ def admin_required(fn):
 def csrf_check():
     if request.method not in ('POST', 'PUT', 'DELETE', 'PATCH'):
         return None
+    # Per-session token (X-CSRF-Token header) pokriva klijente bez
+    # Origin/Referer headera; Origin provjera ostaje kao fallback.
+    token = request.headers.get('X-CSRF-Token', '')
+    expected = session.get('csrf_token', '')
+    if token and expected and hmac.compare_digest(token, expected):
+        return None
     origin = request.headers.get('Origin') or request.headers.get('Referer') or ''
     host = request.host_url.rstrip('/')
     if not origin or not origin.startswith(host):
@@ -114,6 +122,9 @@ def register_before_request(app):
                 return jsonify({'error': 'Unauthorized'}), 401
             return get_login_page()
 
+        if 'csrf_token' not in session:
+            session['csrf_token'] = secrets.token_hex(16)
+
         # First-run wizard: admin && !setup_complete → /setup
         if session.get('uloga') == 'admin':
             if get_config('_setup_complete', '0') != '1':
@@ -123,3 +134,12 @@ def register_before_request(app):
                     return redirect('/setup')
 
         return csrf_check()
+
+    @app.after_request
+    def _csrf_cookie(resp):
+        # Ne-HttpOnly kopija tokena da je frontend fetch wrapper moze citati
+        tok = session.get('csrf_token')
+        if tok and request.cookies.get('csrf_token') != tok:
+            resp.set_cookie('csrf_token', tok, httponly=False, samesite='Lax',
+                            secure=app.config.get('SESSION_COOKIE_SECURE', True))
+        return resp

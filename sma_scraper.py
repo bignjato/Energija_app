@@ -31,9 +31,14 @@ SMA_INV2_ID    = os.environ.get('SMA_INV2_ID', '')
 DB_PATH = os.environ.get('DB_PATH', '/data/hep_energy.db')
 
 
+from netutil import retry_session
+
+SESSION = retry_session()
+
+
 def get_sma_token():
     """Dohvati JWT access token od SMA"""
-    r = requests.post(SMA_TOKEN_URL, data={
+    r = SESSION.post(SMA_TOKEN_URL, data={
         'grant_type': 'password',
         'client_id': SMA_CLIENT_ID,
         'username': SMA_USERNAME,
@@ -50,7 +55,7 @@ def sma_get(token, endpoint, params=None):
         'Authorization': f'Bearer {token}',
         'Accept': 'application/json',
     }
-    r = requests.get(f'{SMA_API_BASE}{endpoint}', headers=headers, params=params, timeout=60)
+    r = SESSION.get(f'{SMA_API_BASE}{endpoint}', headers=headers, params=params, timeout=60)
     if r.status_code == 200 and '<html' not in r.text[:30]:
         return r.json()
     return None
@@ -63,7 +68,7 @@ def sma_post(token, endpoint, payload):
         'Accept': 'application/json',
         'Content-Type': 'application/json',
     }
-    r = requests.post(f'{SMA_API_BASE}{endpoint}', headers=headers, json=payload, timeout=60)
+    r = SESSION.post(f'{SMA_API_BASE}{endpoint}', headers=headers, json=payload, timeout=60)
     if r.status_code == 200:
         return r.json()
     log.warning(f'SMA POST {endpoint}: {r.status_code} {r.text[:200]}')

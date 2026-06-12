@@ -51,7 +51,9 @@ class SmaApiClient:
         self.refresh_token = refresh_token or os.environ.get('SMA_API_REFRESH_TOKEN', '')
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0.0
-        self.s = requests.Session()
+        # retry samo na GET (token POST se ne retry-a — rotacija refresh_tokena)
+        from netutil import retry_session
+        self.s = retry_session()
         self.s.headers.update({'Accept': 'application/json'})
 
     # ---- AUTH ----

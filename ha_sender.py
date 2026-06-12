@@ -42,15 +42,19 @@ log = logging.getLogger("ha_sender")
 
 class HomeAssistantAPI:
     def __init__(self, url: str, token: str):
+        from netutil import retry_session, ha_verify
         self.url   = url.rstrip("/")
         self.headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type":  "application/json",
         }
+        # set_state/import_statistics su idempotentni — POST retry je siguran
+        self.session = retry_session(allow_post=True)
+        self.verify  = ha_verify()
 
     def test_connection(self) -> bool:
         try:
-            r = requests.get(f"{self.url}/api/", headers=self.headers, timeout=10, verify=False)
+            r = self.session.get(f"{self.url}/api/", headers=self.headers, timeout=10, verify=self.verify)
             if r.ok:
                 log.info("✓ HA API dostupan: %s (verzija: %s)", self.url, r.json().get("version","?"))
                 return True
@@ -67,12 +71,12 @@ class HomeAssistantAPI:
             "attributes": attributes or {}
         }
         try:
-            r = requests.post(
+            r = self.session.post(
                 f"{self.url}/api/states/{entity_id}",
                 headers=self.headers,
                 json=payload,
                 timeout=10,
-                verify=False
+                verify=self.verify
             )
             if r.ok:
                 log.debug("✓ %s = %s", entity_id, state)
@@ -111,12 +115,12 @@ class HomeAssistantAPI:
 
         try:
             # WebSocket API za statistike (REST fallback)
-            r = requests.post(
+            r = self.session.post(
                 f"{self.url}/api/services/recorder/import_statistics",
                 headers=self.headers,
                 json=payload,
                 timeout=30,
-                verify=False
+                verify=self.verify
             )
             return r.ok
         except Exception as e:
@@ -305,8 +309,6 @@ def posalji_energy_config(ha: HomeAssistantAPI, conn: sqlite3.Connection):
 
 def main():
     import argparse
-    import urllib3
-    urllib3.disable_warnings()  # Ignoriraj SSL upozorenja za lokalni HA
 
     parser = argparse.ArgumentParser(description="HEP → Home Assistant sender")
     parser.add_argument("--url",   default=None, help="HA URL (default: env HA_URL)")

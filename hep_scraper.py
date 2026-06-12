@@ -72,7 +72,9 @@ def init_db(conn):
 
 class HEPSession:
     def __init__(self):
-        self.session = requests.Session()
+        from netutil import retry_session
+        # HEP API koristi POST za read endpointe — POST retry je siguran
+        self.session = retry_session(allow_post=True)
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*",

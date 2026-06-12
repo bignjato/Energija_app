@@ -35,13 +35,12 @@ import sqlite3
 import sys
 from datetime import datetime
 
-import requests
-import urllib3
+from netutil import ha_verify, retry_session
 
 DB_PATH = os.environ.get('DB_PATH', '/data/hep_energy.db')
 
-# Suppress self-signed warnings (HA često ima self-signed cert)
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+VERIFY  = ha_verify()
+SESSION = retry_session()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 log = logging.getLogger('ha_puller')
@@ -53,7 +52,7 @@ def _get_state(ha_url: str, token: str, entity_id: str) -> tuple:
         return None, None
     url = f"{ha_url.rstrip('/')}/api/states/{entity_id}"
     try:
-        r = requests.get(url, headers={'Authorization': f'Bearer {token}'}, timeout=10, verify=False)
+        r = SESSION.get(url, headers={'Authorization': f'Bearer {token}'}, timeout=10, verify=VERIFY)
         if r.status_code != 200:
             log.warning('HA %s: HTTP %s', entity_id, r.status_code)
             return None, None
@@ -105,12 +104,12 @@ def _midnight_state(ha_url: str, token: str, entity_id: str):
     today_midnight = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%dT%H:%M:%S+00:00')
     url = f"{ha_url.rstrip('/')}/api/history/period/{today_midnight}"
     try:
-        r = requests.get(
+        r = SESSION.get(
             url,
             headers={'Authorization': f'Bearer {token}'},
             params={'filter_entity_id': entity_id, 'minimal_response': 'true'},
             timeout=15,
-            verify=False,
+            verify=VERIFY,
         )
         if r.status_code != 200:
             log.warning('HA history %s: HTTP %s', entity_id, r.status_code)
