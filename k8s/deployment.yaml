@@ -1,0 +1,77 @@
+# Web (gunicorn) + sync (sync_loop.sh) u JEDNOM podu — kao docker-compose.
+# Oba kontejnera dijele isti /data (SQLite). replicas=1 + Recreate jer:
+#   - ReadWriteOnce PVC dopušta samo jedan pod
+#   - SQLite WAL ne podnosi dva odvojena writer-poda
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hep-energy
+  namespace: hep-energy
+  labels:
+    app.kubernetes.io/name: hep-energy
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hep-energy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hep-energy
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999          # da non-root proces može pisati u PVC
+      containers:
+        - name: web
+          image: ghcr.io/bignjato/hep_ha:latest   # prilagodi svom registryju
+          imagePullPolicy: IfNotPresent
+          command: ["gunicorn", "-w", "2", "-b", "0.0.0.0:5000",
+                    "--access-logfile", "-", "--error-logfile", "-",
+                    "--forwarded-allow-ips", "*", "app:app"]
+          ports:
+            - name: http
+              containerPort: 5000
+          envFrom:
+            - secretRef:
+                name: hep-energy-env
+          env:
+            - name: DB_PATH
+              value: /data/hep_energy.db
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+        - name: sync
+          image: ghcr.io/bignjato/hep_ha:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/app/sync_loop.sh"]
+          envFrom:
+            - secretRef:
+                name: hep-energy-env
+          env:
+            - name: DB_PATH
+              value: /data/hep_energy.db
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: hep-data

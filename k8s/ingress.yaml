@@ -1,0 +1,26 @@
+# Ingress s TLS (cert-manager + Let's Encrypt). Prilagodi host i issuer.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hep-energy
+  namespace: hep-energy
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "16m"   # PDF upload računa
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - energija.example.com
+      secretName: hep-energy-tls
+  rules:
+    - host: energija.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hep-energy
+                port:
+                  number: 80

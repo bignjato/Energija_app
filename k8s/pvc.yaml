@@ -1,0 +1,15 @@
+# Trajni volume za SQLite bazu + backupe (/data).
+# SQLite + WAL => jedan pisač po datoteci; web i sync zato dijele JEDAN volume
+# unutar JEDNOG poda (vidi deployment.yaml). ReadWriteOnce je dovoljan.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hep-data
+  namespace: hep-energy
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+  # storageClassName: longhorn   # odkomentiraj i postavi prema svom klasteru

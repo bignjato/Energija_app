@@ -14,3 +14,6 @@ env
 # Dev
 .venv/
 .pytest_cache/
+
+# K8s — ne commitaj stvarni secret
+k8s/secret.yaml
