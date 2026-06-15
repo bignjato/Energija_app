@@ -10,6 +10,39 @@ from ..tariff import HEP_TARIFA, get_vt_udio
 bp = Blueprint('data', __name__, url_prefix='/api')
 
 
+def _omm_filter(prefix=''):
+    """Vrati (sql_clause, params) za filtriranje po mjernom mjestu.
+
+    Čita ?omm= iz querya. Prazno ili 'all' → bez filtra (agregat svih OMM-ova).
+    `prefix` je alias tablice ('h.' ili '') za kvalificiranje kolone.
+    """
+    omm = (request.args.get('omm') or '').strip()
+    if not omm or omm == 'all':
+        return '', []
+    return f"AND {prefix}mjerno_mjesto = ?", [omm]
+
+
+@bp.route('/omm')
+def api_omm():
+    """Lista mjernih mjesta za selektor + zadano (s najviše podataka)."""
+    conn = get_db()
+    try:
+        if conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='mjerna_mjesta'"
+        ).fetchone() is None:
+            return jsonify({'omm': [], 'zadano': None})
+        rows = conn.execute('''
+            SELECT m.id, m.naziv, m.adresa, m.tip,
+                   (SELECT COUNT(*) FROM ocitanja_dnevna d WHERE d.mjerno_mjesto = m.id) as n_dana
+            FROM mjerna_mjesta m
+            ORDER BY n_dana DESC, m.id
+        ''').fetchall()
+        omm = [dict(r) for r in rows]
+        return jsonify({'omm': omm, 'zadano': omm[0]['id'] if omm else None})
+    finally:
+        conn.close()
+
+
 def _efektivne_cijene() -> dict:
     """Izračunaj prosječnu cijenu kupnje/prodaje iz HEP_TARIFA + VT udio.
 
@@ -38,21 +71,24 @@ def _efektivne_cijene() -> dict:
 
 @bp.route('/data')
 def api_data():
+    omm_c, omm_p = _omm_filter()
     conn = get_db()
     try:
-        satna = conn.execute('''
-            SELECT ts, kwh_plus, kwh_minus
+        satna = conn.execute(f'''
+            SELECT ts, SUM(kwh_plus) as kwh_plus, SUM(kwh_minus) as kwh_minus
             FROM ocitanja_satna
-            WHERE ts <= datetime('now') AND kwh_plus > 0
+            WHERE ts <= datetime('now') AND kwh_plus > 0 {omm_c}
+            GROUP BY ts
             ORDER BY ts DESC LIMIT 168
-        ''').fetchall()
+        ''', omm_p).fetchall()
 
-        dnevna = conn.execute('''
-            SELECT datum, kwh_plus, kwh_minus
+        dnevna = conn.execute(f'''
+            SELECT datum, SUM(kwh_plus) as kwh_plus, SUM(kwh_minus) as kwh_minus
             FROM ocitanja_dnevna
-            WHERE datum <= date('now')
+            WHERE datum <= date('now') {omm_c}
+            GROUP BY datum
             ORDER BY datum DESC LIMIT 90
-        ''').fetchall()
+        ''', omm_p).fetchall()
 
         has_sma = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='sma_live'"
@@ -154,14 +190,16 @@ def api_data():
 
 @bp.route('/data/sve')
 def api_data_sve():
+    omm_c, omm_p = _omm_filter()
     conn = get_db()
     try:
-        dnevna = conn.execute('''
-            SELECT datum, kwh_plus, kwh_minus
+        dnevna = conn.execute(f'''
+            SELECT datum, SUM(kwh_plus) as kwh_plus, SUM(kwh_minus) as kwh_minus
             FROM ocitanja_dnevna
-            WHERE datum <= date('now')
+            WHERE datum <= date('now') {omm_c}
+            GROUP BY datum
             ORDER BY datum DESC
-        ''').fetchall()
+        ''', omm_p).fetchall()
         has_sma = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='sma_dnevna'"
         ).fetchone() is not None
@@ -185,6 +223,7 @@ def api_povijest():
     od  = request.args.get('od',  (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'))
     do  = request.args.get('do',  datetime.now().strftime('%Y-%m-%d'))
     res = request.args.get('res', 'day')
+    omm_c, omm_p = _omm_filter()
 
     conn = get_db()
     try:
@@ -196,12 +235,13 @@ def api_povijest():
         ).fetchone() is not None
 
         if res == 'hour':
-            hep = conn.execute('''
-                SELECT ts, kwh_plus, kwh_minus
+            hep = conn.execute(f'''
+                SELECT ts, SUM(kwh_plus) as kwh_plus, SUM(kwh_minus) as kwh_minus
                 FROM ocitanja_satna
-                WHERE date(ts) BETWEEN ? AND ? AND ts <= datetime('now')
+                WHERE date(ts) BETWEEN ? AND ? AND ts <= datetime('now') {omm_c}
+                GROUP BY ts
                 ORDER BY ts
-            ''', (od, do)).fetchall()
+            ''', [od, do] + omm_p).fetchall()
             sma = []
             if has_15min:
                 sma = conn.execute('''
@@ -219,17 +259,17 @@ def api_povijest():
                             'sma': [dict(r) for r in sma]})
 
         if res == 'week':
-            hep = conn.execute('''
+            hep = conn.execute(f'''
                 SELECT strftime('%Y-W%W', datum) as tjedan,
                        MIN(datum) as datum_od,
                        ROUND(SUM(kwh_plus), 2) as kwh_plus,
                        ROUND(SUM(kwh_minus), 2) as kwh_minus,
-                       COUNT(*) as n_dana
+                       COUNT(DISTINCT datum) as n_dana
                 FROM ocitanja_dnevna
-                WHERE datum BETWEEN ? AND ? AND datum <= date('now')
+                WHERE datum BETWEEN ? AND ? AND datum <= date('now') {omm_c}
                 GROUP BY strftime('%Y-W%W', datum)
                 ORDER BY tjedan
-            ''', (od, do)).fetchall()
+            ''', [od, do] + omm_p).fetchall()
             sma = []
             if has_sma:
                 sma = conn.execute('''
@@ -246,12 +286,13 @@ def api_povijest():
                             'hep': [dict(r) for r in hep],
                             'sma': [dict(r) for r in sma]})
 
-        hep = conn.execute('''
-            SELECT datum, kwh_plus, kwh_minus
+        hep = conn.execute(f'''
+            SELECT datum, SUM(kwh_plus) as kwh_plus, SUM(kwh_minus) as kwh_minus
             FROM ocitanja_dnevna
-            WHERE datum BETWEEN ? AND ? AND datum <= date('now')
+            WHERE datum BETWEEN ? AND ? AND datum <= date('now') {omm_c}
+            GROUP BY datum
             ORDER BY datum
-        ''', (od, do)).fetchall()
+        ''', [od, do] + omm_p).fetchall()
         sma = []
         if has_sma:
             sma = conn.execute('''

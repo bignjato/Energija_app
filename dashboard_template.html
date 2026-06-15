@@ -20,6 +20,7 @@
   </div>
   <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
     <button id="themeToggle" onclick="toggleTheme()" title="Promijeni temu" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:8px;cursor:pointer;font-size:16px;line-height:1">🌙</button>
+    <select id="ommSelect" onchange="changeOmm()" title="Mjerno mjesto" style="display:none;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:6px;font-family:var(--mono);font-size:12px;cursor:pointer;max-width:220px"></select>
     <select id="syncInterval" onchange="changeSyncInterval()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:6px;font-family:var(--mono);font-size:12px;cursor:pointer">
       <option value="30">30 sek</option><option value="60" selected>1 min</option><option value="300">5 min</option><option value="600">10 min</option><option value="0">Ručno</option>
     </select>
@@ -216,6 +217,13 @@
       <div class="sub">Potrošnja / Predaja / Solar</div>
       <div class="cw h250"><canvas id="cDnevni"></canvas></div>
     </div>
+  </div>
+
+  <!-- Kumulativni kWh — tekući mjesec -->
+  <div class="cc" style="margin-top:14px;margin-bottom:0">
+    <h3>📈 Kumulativ — tekući mjesec</h3>
+    <div class="sub">Zbroj od 1. u mjesecu do danas: potrošnja iz mreže / predaja / solar</div>
+    <div class="cw h250"><canvas id="cKumulativ"></canvas></div>
   </div>
 
 </div></div>

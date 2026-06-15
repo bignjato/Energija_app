@@ -59,10 +59,47 @@ const sumK=(arr,k)=>arr.reduce((a,b)=>a+(+b[k]||0),0);
 const avgK=(arr,k)=>{const v=arr.filter(r=>r[k]!=null).map(r=>+r[k]);return v.length?v.reduce((a,b)=>a+b)/v.length:0;};
 const set=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v;};
 
+// ---- MULTI-OMM ----
+let selectedOMM = localStorage.getItem('omm') || '';
+// Dodaj ?omm= na URL ako je odabrano specifično mjerno mjesto
+function withOmm(url){
+  if(!selectedOMM) return url;
+  return url + (url.includes('?') ? '&' : '?') + 'omm=' + encodeURIComponent(selectedOMM);
+}
+async function loadOmmList(){
+  try{
+    const r = await fetch('/api/omm', {credentials:'same-origin'});
+    const d = await r.json();
+    const sel = document.getElementById('ommSelect');
+    if(!sel) return;
+    const list = d.omm || [];
+    // Selektor ima smisla samo uz ≥2 mjerna mjesta
+    if(list.length < 2){ sel.style.display='none'; selectedOMM=''; return; }
+    // Validiraj spremljeni izbor
+    if(selectedOMM && !list.some(o=>o.id===selectedOMM)){ selectedOMM=''; localStorage.removeItem('omm'); }
+    sel.innerHTML = list.map(o=>{
+      const ime = o.naziv || o.id;
+      const adr = o.adresa ? ` · ${o.adresa}` : '';
+      return `<option value="${o.id}">${ime}${adr} (${o.id})</option>`;
+    }).join('');
+    sel.value = selectedOMM || list[0].id;
+    sel.style.display = '';
+  }catch(e){console.error('omm list', e);}
+}
+function changeOmm(){
+  const sel = document.getElementById('ommSelect');
+  selectedOMM = sel.value || '';
+  localStorage.setItem('omm', selectedOMM);
+  // Osvježi poglede koji ovise o OMM-u
+  load();
+  if(window._usporedbaRows!==undefined) renderUsporedba();
+  if(typeof POV!=='undefined' && POV) loadPovijest();
+}
+
 // ---- LOAD ----
 async function load(){
   try{
-    const r=await fetch('/api/data');
+    const r=await fetch(withOmm('/api/data'));
     D=await r.json();
     renderPregled();
     set('lastUpdate', new Date().toLocaleTimeString('hr-HR'));
@@ -149,6 +186,30 @@ function renderPregled(){
     {label:'Potrošnja',data:h30.map(r=>r.kwh_plus||0),backgroundColor:'rgba(167,139,250,.65)',borderRadius:2},
     {label:'Predaja',data:h30.map(r=>r.kwh_minus||0),backgroundColor:'rgba(56,189,248,.65)',borderRadius:2},
     {label:'Solar',data:h30.map(r=>{const s=D.sma_dnevna.find(x=>x.datum===r.datum);return s?s.pv_generation_kwh||0:0;}),type:'line',borderColor:'#fbbf24',fill:false,tension:.4,pointRadius:2,borderWidth:2},
+  ],'kWh');
+
+  renderKumulativ();
+}
+
+// Kumulativ kWh za tekući mjesec — running sum po danima (1. → danas)
+function renderKumulativ(){
+  if(!document.getElementById('cKumulativ')) return;
+  const ms=mS(), danas=today();
+  const hep=D.dnevna.filter(r=>r.datum>=ms && r.datum<=danas).sort((a,b)=>a.datum<b.datum?-1:1);
+  const labels=[], cP=[], cM=[], cS=[];
+  let aP=0,aM=0,aS=0;
+  for(const r of hep){
+    aP+=(+r.kwh_plus||0);
+    aM+=(+r.kwh_minus||0);
+    const s=D.sma_dnevna.find(x=>x.datum===r.datum);
+    aS+=s?(+s.pv_generation_kwh||0):0;
+    labels.push(r.datum.slice(8));  // dan u mjesecu
+    cP.push(+aP.toFixed(2)); cM.push(+aM.toFixed(2)); cS.push(+aS.toFixed(2));
+  }
+  mkChart('cKumulativ','line',labels,[
+    {label:'Potrošnja iz mreže (kWh)',data:cP,borderColor:'#a78bfa',backgroundColor:'rgba(167,139,250,.10)',fill:true,tension:.3,pointRadius:0,borderWidth:2},
+    {label:'Predaja (kWh)',data:cM,borderColor:'#38bdf8',backgroundColor:'rgba(56,189,248,.08)',fill:true,tension:.3,pointRadius:0,borderWidth:2},
+    {label:'Solar (kWh)',data:cS,borderColor:'#fbbf24',backgroundColor:'rgba(251,191,36,.08)',fill:true,tension:.3,pointRadius:0,borderWidth:2},
   ],'kWh');
 }
 
@@ -689,7 +750,7 @@ async function loadPovijest(){
   if(!od||!doo) return;
 
   try{
-    const r=await fetch(`/api/povijest?od=${od}&do=${doo}&res=${res}`);
+    const r=await fetch(withOmm(`/api/povijest?od=${od}&do=${doo}&res=${res}`));
     POV=await r.json();
     renderPovijest();
   }catch(e){console.error(e);}
@@ -827,8 +888,8 @@ async function loadUsporedba(){
   if(!aOd||!aDo||!bOd||!bDo) return;
 
   const [rA, rB] = await Promise.all([
-    fetch(`/api/povijest?od=${aOd}&do=${aDo}&res=day`).then(r=>r.json()),
-    fetch(`/api/povijest?od=${bOd}&do=${bDo}&res=day`).then(r=>r.json()),
+    fetch(withOmm(`/api/povijest?od=${aOd}&do=${aDo}&res=day`)).then(r=>r.json()),
+    fetch(withOmm(`/api/povijest?od=${bOd}&do=${bDo}&res=day`)).then(r=>r.json()),
   ]);
 
   const sumA={p:0,m:0,sol:0}, sumB={p:0,m:0,sol:0};
@@ -1676,6 +1737,7 @@ async function loadVtNtTrosak() {
   }
 }
 
+loadOmmList();
 load();
 syncTimer = setInterval(load, 60000);
 // Učitaj peak snagu odmah (Pregled je default tab)
