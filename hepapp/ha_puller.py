@@ -33,7 +33,7 @@ import logging
 import os
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 from netutil import ha_verify, retry_session
 
@@ -101,7 +101,7 @@ def _midnight_state(ha_url: str, token: str, entity_id: str):
     if not entity_id:
         return None, None
     # UTC ponoć danas — HA očekuje ISO 8601 s timezone offsetom
-    today_midnight = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+    today_midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%dT%H:%M:%S+00:00')
     url = f"{ha_url.rstrip('/')}/api/history/period/{today_midnight}"
     try:
         r = SESSION.get(
@@ -201,7 +201,7 @@ def pull_recent():
                               total_consumption_w, autarky_rate, battery_soc)
         VALUES (?,?,?,?,?,?,?)
     ''', (
-        datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+00:00'),
+        datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S+00:00'),
         pv, feed, grid, cons, aut, soc,
     ))
     conn.commit()
