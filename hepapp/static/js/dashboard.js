@@ -1745,8 +1745,15 @@ async function loadVtNtTrosak() {
 loadOmmList();
 load();
 syncTimer = setInterval(load, 60000);
-// Učitaj peak snagu odmah (Pregled je default tab)
+// Pregled je default aktivan tab pa se goTo('pregled') NE okida na prvom
+// učitavanju — zato ovdje ručno pozovi sve njegove loadere (inače su
+// Informacije o postrojenju / Eko & Financije / PV kartice prazne do prvog
+// prebacivanja taba).
 loadPeakSnaga();
+loadPlantInfo();
+loadCijene();
+loadWeather();
+loadPowerLimit();
 // Auto-refresh Energy flow svakih 10 sekundi (samo kad je Pregled aktivan)
 setInterval(() => {
   if (document.getElementById('page-pregled')?.classList.contains('active')) {
