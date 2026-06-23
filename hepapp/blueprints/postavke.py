@@ -63,9 +63,17 @@ def api_postavke():
                     existing[k.strip()] = v.strip()
 
     # SECRET_KEY se NIKAD ne mijenja preko UI-a (rotacija invalidira sve sesije)
+    SECRET_KEYS = {'HEP_PASSWORD', 'SMA_PASSWORD', 'HA_TOKEN', 'DASHBOARD_PASSWORD',
+                   'SMA_CLIENT_ID'}
+    secret_changed = False
     for key in all_keys:
         if key in data and data[key] != '':
             existing[key] = data[key]
+            if key in SECRET_KEYS:
+                secret_changed = True
+    # Zabiljezi datum promjene tajni (za check_token_age podsjetnik o rotaciji)
+    if secret_changed:
+        set_config('_secrets_updated', datetime.now().strftime('%Y-%m-%d'))
 
     lines = ['# HEP Energy Monitor konfiguracija\n']
     sections = {

@@ -20,6 +20,20 @@ def get_db():
     return conn
 
 
+# Trenutna verzija sheme. Povećaj kad dodaš migraciju u _run_migrations.
+SCHEMA_VERSION = 1
+
+
+def _get_schema_version(conn) -> int:
+    conn.execute('CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)')
+    row = conn.execute('SELECT MAX(version) FROM schema_version').fetchone()
+    return (row[0] if row and row[0] is not None else 0)
+
+
+def _set_schema_version(conn, v: int):
+    conn.execute('INSERT INTO schema_version (version) VALUES (?)', (v,))
+
+
 def init_db():
     """Tablice, defaultovi, WAL mode."""
     conn = sqlite3.connect(DB_PATH)
@@ -63,23 +77,9 @@ def init_db():
         )
     ''')
 
-    # Migracija: dodaj nove kolone u racuni (idempotentno)
-    racuni_cols_to_add = [
-        ('dug',             'REAL'),
-        ('pretplata',       'REAL'),
-        ('mjerna_mjernina', 'REAL'),
-        ('kamata',          'REAL'),
-        ('datum_racuna',    'TEXT'),
-        ('datum_dospijeca', 'TEXT'),
-        ('model_tarife',    'TEXT'),
-        ('sifra_kupca',     'TEXT'),
-        ('broj_racuna',     'TEXT'),
-    ]
-    existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(racuni)").fetchall()}
-    for col, typ in racuni_cols_to_add:
-        if col not in existing_cols:
-            conn.execute(f'ALTER TABLE racuni ADD COLUMN {col} {typ}')
-            log.info(f'Migracija: dodana racuni.{col}')
+    # Verzionirane migracije (gate-ane schema_version tablicom).
+    from_v = _get_schema_version(conn)
+    _run_migrations(conn, from_v)
 
     count = conn.execute('SELECT COUNT(*) FROM korisnici').fetchone()[0]
     if count == 0:
@@ -129,8 +129,39 @@ def init_db():
             conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('_setup_complete', '1')")
             log.info('Postojeća instalacija — setup wizard preskačem.')
 
+    # Datum tajni za check_token_age — postavi na migraciji ako fali
+    if conn.execute("SELECT 1 FROM config WHERE key='_secrets_updated'").fetchone() is None:
+        from datetime import date
+        conn.execute("INSERT INTO config (key, value) VALUES ('_secrets_updated', ?)",
+                     (date.today().isoformat(),))
+
+    # Stamp current schema version once migrations completed
+    if _get_schema_version(conn) < SCHEMA_VERSION:
+        _set_schema_version(conn, SCHEMA_VERSION)
+        log.info('Schema verzija → %d', SCHEMA_VERSION)
+
     conn.commit()
     conn.close()
+
+
+def _run_migrations(conn, from_v: int):
+    """Idempotentne, version-gate-ane migracije sheme.
+
+    Svaka migracija mora biti sigurna za ponovno pokretanje. Za novu promjenu:
+    povećaj SCHEMA_VERSION i dodaj blok `if from_v < N:`.
+    """
+    # v1: kolone HEP računa (dug, pretplata, datumi, model tarife, ...)
+    if from_v < 1:
+        racuni_cols = [
+            ('dug', 'REAL'), ('pretplata', 'REAL'), ('mjerna_mjernina', 'REAL'),
+            ('kamata', 'REAL'), ('datum_racuna', 'TEXT'), ('datum_dospijeca', 'TEXT'),
+            ('model_tarife', 'TEXT'), ('sifra_kupca', 'TEXT'), ('broj_racuna', 'TEXT'),
+        ]
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(racuni)").fetchall()}
+        for col, typ in racuni_cols:
+            if col not in existing:
+                conn.execute(f'ALTER TABLE racuni ADD COLUMN {col} {typ}')
+                log.info('Migracija v1: dodana racuni.%s', col)
 
 
 def get_config(key, default=''):
