@@ -4,7 +4,7 @@ import logging
 
 from flask import Blueprint, jsonify, request, session
 
-from ..bill_parser import extract_text, parse_hep_bill
+from ..bill_parser import extract_text, missing_key_fields, parse_hep_bill
 from ..core import admin_required
 from ..db import get_db
 
@@ -135,4 +135,11 @@ def api_upload_pdf():
     parsed = parse_hep_bill(text)
     parsed['ok'] = True
     parsed['filename'] = f.filename
+    nedostaje = missing_key_fields(parsed)
+    if nedostaje:
+        parsed['warning'] = (
+            'Nisam pouzdano prepoznao: ' + ', '.join(nedostaje) +
+            '. HEP je možda promijenio format računa — provjeri i ručno ispravi prije spremanja.'
+        )
+        log.warning('PDF %s: neprepoznata polja: %s', f.filename, nedostaje)
     return jsonify(parsed)

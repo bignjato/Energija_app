@@ -520,6 +520,11 @@ async function uploadPdf(){
     status.innerHTML = `✓ Prepoznato ${filled}/${allFields.length} polja iz "${d.filename}".`
       + (extras.length ? ` <span style="color:var(--muted)">(${extras.join(' · ')})</span>` : '')
       + ` Klikni "Spremi račun".`;
+    if (d.warning) {
+      status.innerHTML += `<div style="margin-top:8px;padding:8px 10px;border-radius:6px;`
+        + `background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.4);color:#fbbf24;font-size:12px">`
+        + `⚠️ ${d.warning}</div>`;
+    }
   } catch(e) {
     status.textContent = 'Network error: ' + e;
   }

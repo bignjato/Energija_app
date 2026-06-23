@@ -34,6 +34,22 @@ def _to_float(s):
         return None
 
 
+# Ključna polja bez kojih je račun (i projekcija duga) nepouzdan
+KEY_FIELDS = {
+    'period':   'razdoblje računa',
+    'iznos':    'ukupni iznos',
+    'kwh_plus': 'ukupna potrošnja',
+    'opskrba':  'iznos opskrbe',
+    'mreza':    'iznos mreže',
+    'pdv':      'PDV',
+}
+
+
+def missing_key_fields(parsed: dict) -> list:
+    """Vrati ljudske nazive ključnih polja koja parser nije prepoznao."""
+    return [naziv for f, naziv in KEY_FIELDS.items() if parsed.get(f) in (None, '')]
+
+
 def _search(patterns, text, group=1):
     for p in patterns:
         m = re.search(p, text, flags=re.IGNORECASE | re.MULTILINE)
