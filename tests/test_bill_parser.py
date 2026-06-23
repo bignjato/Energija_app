@@ -7,7 +7,7 @@ prvi i pokazu koje polje je prestalo raditi.
 
 import pytest
 
-from hepapp.bill_parser import _to_float, parse_hep_bill
+from hepapp.bill_parser import _to_float, missing_key_fields, parse_hep_bill
 
 SAMPLE = """HEP ELEKTRA d.o.o.
 Šifra kupca: 1234567
@@ -92,3 +92,29 @@ def test_prazan_tekst_ne_puca():
     res = parse_hep_bill('')
     assert res['iznos'] is None
     assert res['period'] is None
+
+
+def test_missing_key_fields_potpun_racun(parsed):
+    assert missing_key_fields(parsed) == []
+
+
+def test_missing_key_fields_prazan():
+    res = parse_hep_bill('')
+    nedostaje = missing_key_fields(res)
+    # prazan tekst => sva ključna polja nedostaju
+    assert 'ukupni iznos' in nedostaje
+    assert 'ukupna potrošnja' in nedostaje
+    assert 'PDV' in nedostaje
+    assert len(nedostaje) == 6
+
+
+def test_missing_key_fields_djelomicno():
+    # samo iznos i period prepoznati, mreža/pdv/opskrba/potrošnja fale
+    txt = ("Ukupni iznos računa za 4/2026\n"
+           "Ukupni iznos za korištenje mreže 19,80 € 79,10 €\n")
+    res = parse_hep_bill(txt)
+    nedostaje = missing_key_fields(res)
+    assert 'ukupni iznos' not in nedostaje      # 79,10 prepoznat
+    assert 'razdoblje računa' not in nedostaje   # 4/2026 prepoznat
+    assert 'PDV' in nedostaje
+    assert 'ukupna potrošnja' in nedostaje
