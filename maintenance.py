@@ -11,6 +11,9 @@ Pokretanje:
   python /app/maintenance.py --check-freshness
   python /app/maintenance.py --check-anomaly
   python /app/maintenance.py --bill-reminder
+  python /app/maintenance.py --restore-drill
+  python /app/maintenance.py --check-offsite
+  python /app/maintenance.py --check-token-age
 """
 import os, sqlite3, logging, argparse, sys
 from datetime import datetime, timedelta, timezone
@@ -245,15 +248,29 @@ def check_freshness(conn, max_hep_h=48, max_sma_h=12):
 
 
 # ---------- 3. Anomaly detection (potrosnja iznad prosjeka) ----------
-def check_anomaly(conn, threshold_perc=None, min_samples=3, min_avg_kwh=1.0):
-    """Alarm ako je potrosnja zadnjeg kompletnog dana >X% iznad prosjeka
-    istog dana u tjednu (zadnjih 8 tjedana). Notifikacija max jednom po datumu.
+def check_anomaly(conn, threshold_perc=None, min_samples=3, min_avg_kwh=1.0,
+                  min_abs_kwh=None):
+    """Alarm ako potrosnja zadnjeg kompletnog dana znacajno odskace.
+
+    Da se izbjegnu sezonski lazni alarmi (npr. pocetak grijanja digne SVE dane),
+    okida samo ako je dan iznad praga u OBA referentna okvira:
+      - same-weekday: prosjek istog dana u tjednu (zadnjih 8 tjedana)
+      - rolling-14:   prosjek bilo kojeg dana zadnjih 14 dana
+    Postupni sezonski rast digne i rolling-14 prosjek pa razlika nestaje;
+    pravi jednodnevni skok probija oba. Uz to mora preci apsolutni kWh prag
+    (ANOMALY_MIN_ABS_KWH, default 3) da se filtrira sum na malim brojkama.
+    Notifikacija max jednom po datumu.
     """
     if threshold_perc is None:
         try:
             threshold_perc = float(os.environ.get('ANOMALY_THRESHOLD_PERC', '50'))
         except ValueError:
             threshold_perc = 50.0
+    if min_abs_kwh is None:
+        try:
+            min_abs_kwh = float(os.environ.get('ANOMALY_MIN_ABS_KWH', '3'))
+        except ValueError:
+            min_abs_kwh = 3.0
 
     zadnji = conn.execute(
         'SELECT datum, ROUND(SUM(kwh_plus),2) kp FROM ocitanja_dnevna '
@@ -267,7 +284,7 @@ def check_anomaly(conn, threshold_perc=None, min_samples=3, min_avg_kwh=1.0):
         log.info('check_anomaly: %s vec provjeren', datum)
         return False
 
-    ref = conn.execute('''
+    wd = conn.execute('''
         SELECT AVG(kp) avg_kp, COUNT(*) n FROM (
             SELECT datum, SUM(kwh_plus) kp FROM ocitanja_dnevna
             WHERE datum < ? AND datum >= date(?, '-56 days')
@@ -275,20 +292,31 @@ def check_anomaly(conn, threshold_perc=None, min_samples=3, min_avg_kwh=1.0):
             GROUP BY datum
         )
     ''', (datum, datum, datum)).fetchone()
+    roll = conn.execute('''
+        SELECT AVG(kp) avg_kp, COUNT(*) n FROM (
+            SELECT datum, SUM(kwh_plus) kp FROM ocitanja_dnevna
+            WHERE datum < ? AND datum >= date(?, '-14 days')
+            GROUP BY datum
+        )
+    ''', (datum, datum)).fetchone()
     _set_cfg(conn, '_anomaly_last_date', datum)
 
-    if not ref or (ref['n'] or 0) < min_samples or (ref['avg_kp'] or 0) < min_avg_kwh:
-        log.info('check_anomaly: premalo referentnih dana (%s)', ref['n'] if ref else 0)
+    if not wd or (wd['n'] or 0) < min_samples or (wd['avg_kp'] or 0) < min_avg_kwh:
+        log.info('check_anomaly: premalo referentnih dana (%s)', wd['n'] if wd else 0)
         return False
-    avg = ref['avg_kp']
-    odstupanje = 100.0 * (kp - avg) / avg
-    log.info('check_anomaly: %s %.1f kWh vs prosjek %.1f kWh (%+.0f%%, prag +%.0f%%)',
-             datum, kp, avg, odstupanje, threshold_perc)
-    if odstupanje < threshold_perc:
+    avg_wd = wd['avg_kp']
+    avg_roll = roll['avg_kp'] if roll and (roll['n'] or 0) >= min_samples else avg_wd
+    odst_wd   = 100.0 * (kp - avg_wd) / avg_wd
+    odst_roll = 100.0 * (kp - avg_roll) / avg_roll if avg_roll else 0
+    log.info('check_anomaly: %s %.1f kWh | same-weekday %.1f (%+.0f%%) | rolling14 %.1f (%+.0f%%) | prag +%.0f%%, min abs %.1f',
+             datum, kp, avg_wd, odst_wd, avg_roll, odst_roll, threshold_perc, min_abs_kwh)
+    # Mora probiti prag u OBA okvira + apsolutni minimum nad oba prosjeka
+    if (odst_wd < threshold_perc or odst_roll < threshold_perc
+            or (kp - avg_wd) < min_abs_kwh or (kp - avg_roll) < min_abs_kwh):
         return False
     ha_notify('Energetski Monitor — anomalija potrosnje',
-              f'{datum}: potrosnja {kp:.1f} kWh je {odstupanje:.0f}% iznad prosjeka '
-              f'za taj dan u tjednu ({avg:.1f} kWh, zadnjih 8 tjedana).')
+              f'{datum}: potrosnja {kp:.1f} kWh je {odst_wd:.0f}% iznad prosjeka za taj dan u '
+              f'tjednu ({avg_wd:.1f} kWh) i {odst_roll:.0f}% iznad prosjeka zadnjih 14 dana ({avg_roll:.1f} kWh).')
     return True
 
 
@@ -321,6 +349,139 @@ def bill_reminder(conn, od_dana=10):
     return True
 
 
+# ---------- 7. Restore drill (provjera da je backup vracljiv) ----------
+BACKUP_DIR = os.environ.get('BACKUP_DIR', '/data/backups')
+OFFSITE_MARKER = os.environ.get('OFFSITE_MARKER', '/data/.last_offsite_ok')
+DRILL_KEY_TABLES = ('config', 'racuni', 'ocitanja_dnevna')
+
+
+def restore_drill(conn, every_days=30):
+    """Otvori najnoviji backup, integrity_check + provjera kljucnih tablica.
+
+    Backup koji nitko nije probao vratiti nije backup. Pokrece se ~mjesecno;
+    cadence se cuva u config (_restore_drill_last). Alert na neuspjeh.
+    """
+    last = _get_cfg(conn, '_restore_drill_last')
+    today = datetime.now().strftime('%Y-%m-%d')
+    if last:
+        try:
+            if (datetime.fromisoformat(today) - datetime.fromisoformat(last)).days < every_days:
+                log.info('restore_drill: preskacem (zadnji %s)', last)
+                return False
+        except ValueError:
+            pass
+
+    import glob
+    backupi = sorted(glob.glob(os.path.join(BACKUP_DIR, 'hep_energy_*.db')))
+    if not backupi:
+        log.warning('restore_drill: nema backupa u %s', BACKUP_DIR)
+        ha_notify('Energetski Monitor — backup',
+                  f'Restore drill: nema nijednog backupa u {BACKUP_DIR}!')
+        return False
+    latest = backupi[-1]
+    problemi = []
+    try:
+        b = sqlite3.connect(f'file:{latest}?mode=ro', uri=True)
+        b.row_factory = sqlite3.Row
+        ic = b.execute('PRAGMA integrity_check').fetchone()[0]
+        if ic != 'ok':
+            problemi.append(f'integrity_check: {ic}')
+        tablice = {r['name'] for r in b.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        for t in DRILL_KEY_TABLES:
+            if t not in tablice:
+                problemi.append(f'nedostaje tablica {t}')
+            else:
+                n = b.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0]
+                log.info('restore_drill: %s = %d redaka', t, n)
+        b.close()
+    except sqlite3.Error as e:
+        problemi.append(f'ne mogu otvoriti backup: {e}')
+
+    _set_cfg(conn, '_restore_drill_last', today)
+    if problemi:
+        poruka = f'Restore drill NEUSPJESAN ({os.path.basename(latest)}):\n• ' + '\n• '.join(problemi)
+        log.error(poruka.replace('\n', ' | '))
+        ha_notify('Energetski Monitor — backup PROBLEM', poruka)
+        return False
+    log.info('restore_drill: OK (%s vracljiv)', os.path.basename(latest))
+    return True
+
+
+# ---------- 8. Off-site backup health ----------
+def check_offsite(conn, max_age_days=2, remind_disabled_days=30):
+    """Alert ako je off-site ukljucen ali zadnji upload zastario; ili podsjeti
+    (rijetko) ako je off-site iskljucen pa backupi zive samo na istom volumenu.
+    """
+    mode = (os.environ.get('OFFSITE_BACKUP_MODE', 'disabled') or 'disabled').strip().lower()
+    today = datetime.now().strftime('%Y-%m-%d')
+
+    if mode == 'disabled' or not os.environ.get('OFFSITE_BACKUP_DEST', '').strip():
+        last_warn = _get_cfg(conn, '_offsite_warn_last')
+        if last_warn:
+            try:
+                if (datetime.fromisoformat(today) - datetime.fromisoformat(last_warn)).days < remind_disabled_days:
+                    return False
+            except ValueError:
+                pass
+        _set_cfg(conn, '_offsite_warn_last', today)
+        log.warning('check_offsite: off-site iskljucen — backupi su samo na lokalnom volumenu')
+        ha_notify('Energetski Monitor — backup',
+                  'Off-site backup je iskljucen. Backupi baze zive samo na istom volumenu '
+                  'kao i baza — gubitak volumena znaci gubitak svega. Postavi OFFSITE_BACKUP_MODE.')
+        return False
+
+    # ukljucen — provjeri marker zadnjeg uspjesnog uploada (pise offsite_backup.sh)
+    try:
+        with open(OFFSITE_MARKER) as f:
+            zadnji = f.read().strip()
+    except OSError:
+        zadnji = None
+    if not zadnji:
+        log.info('check_offsite: nema markera uspjeha (jos nije bilo uploada?)')
+        return False
+    try:
+        dana = (datetime.fromisoformat(today) - datetime.fromisoformat(zadnji[:10])).days
+    except ValueError:
+        return False
+    if dana > max_age_days:
+        log.warning('check_offsite: zadnji off-site upload prije %d dana (%s)', dana, zadnji)
+        ha_notify('Energetski Monitor — backup',
+                  f'Off-site backup kasni {dana} dana (zadnji uspjesan: {zadnji}). Provjeri rclone/rsync.')
+        return True
+    log.info('check_offsite: OK (zadnji upload %s)', zadnji)
+    return False
+
+
+# ---------- 9. Podsjetnik za rotaciju tokena/lozinki ----------
+def check_token_age(conn, max_age_days=90):
+    """Alert ako su tajne (HEP/SMA/HA) starije od max_age_days.
+
+    _secrets_updated postavlja postavke.py pri spremanju tajni; ako fali,
+    init_db ga postavi na datum migracije. Podsjetnik max jednom po mjesecu.
+    """
+    updated = _get_cfg(conn, '_secrets_updated')
+    if not updated:
+        return False
+    today = datetime.now().strftime('%Y-%m-%d')
+    try:
+        dana = (datetime.fromisoformat(today) - datetime.fromisoformat(updated[:10])).days
+    except ValueError:
+        return False
+    if dana < max_age_days:
+        log.info('check_token_age: OK (tajne stare %d dana)', dana)
+        return False
+    ovaj_mj = today[:7]
+    if _get_cfg(conn, '_token_age_warn_month') == ovaj_mj:
+        return False
+    _set_cfg(conn, '_token_age_warn_month', ovaj_mj)
+    log.warning('check_token_age: tajne stare %d dana (od %s)', dana, updated)
+    ha_notify('Energetski Monitor — sigurnost',
+              f'HEP/SMA/HA tajne su stare {dana} dana (zadnja promjena {updated[:10]}). '
+              'Razmisli o rotaciji tokena/lozinki u Postavkama.')
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--all', action='store_true')
@@ -332,6 +493,9 @@ def main():
     ap.add_argument('--check-freshness', action='store_true')
     ap.add_argument('--check-anomaly', action='store_true')
     ap.add_argument('--bill-reminder', action='store_true')
+    ap.add_argument('--restore-drill', action='store_true')
+    ap.add_argument('--check-offsite', action='store_true')
+    ap.add_argument('--check-token-age', action='store_true')
     a = ap.parse_args()
 
     conn = _conn()
@@ -350,9 +514,16 @@ def main():
             check_anomaly(conn)
         if a.all or a.bill_reminder:
             bill_reminder(conn)
+        if a.all or a.restore_drill:
+            restore_drill(conn)
+        if a.all or a.check_offsite:
+            check_offsite(conn)
+        if a.all or a.check_token_age:
+            check_token_age(conn)
         if not any([a.all, a.backfill_daily, a.normalize_ts, a.prune_live,
                     a.backfill_range, a.check_freshness, a.check_anomaly,
-                    a.bill_reminder]):
+                    a.bill_reminder, a.restore_drill, a.check_offsite,
+                    a.check_token_age]):
             ap.print_help()
     finally:
         conn.close()

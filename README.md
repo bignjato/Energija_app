@@ -69,7 +69,8 @@ sma_scraper.py         — SMA Sunny Portal live scraper
 sma_history_import.py  — SMA history backfill
 ha_sender.py           — Home Assistant senzor push
 netutil.py             — HTTP retry/backoff + HA_VERIFY_SSL helper
-maintenance.py         — backfill, retencija, alerti (stale/anomalija/računi)
+maintenance.py         — backfill, retencija, alerti (stale/anomalija/računi),
+                         restore-drill, off-site i token-age provjere
 sync_loop.sh           — orkestracija (SMA 5min, HEP+HA 1h, history 24h)
 offsite_backup.sh      — opcionalan upload na rclone/rsync remote
 tests/                 — pytest (bill parser, tarife, scraper, maintenance)

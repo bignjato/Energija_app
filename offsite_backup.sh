@@ -43,6 +43,7 @@ case "$MODE" in
         log "rclone copy $LATEST → $DEST"
         if rclone copy "$LATEST" "$DEST" 2>&1 | tee -a "$LOG"; then
             log "OK rclone upload"
+            date '+%Y-%m-%d' > /data/.last_offsite_ok
             # Retencija na remote
             rclone delete --min-age "${KEEP}d" "$DEST" 2>&1 | tee -a "$LOG" || true
         else
@@ -59,6 +60,7 @@ case "$MODE" in
         if rsync -az -e "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes" \
                  "$LATEST" "$DEST" 2>&1 | tee -a "$LOG"; then
             log "OK rsync upload"
+            date '+%Y-%m-%d' > /data/.last_offsite_ok
         else
             log "ERROR rsync upload failed"
             exit 3
