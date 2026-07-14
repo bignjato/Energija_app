@@ -212,6 +212,141 @@ def api_registri():
         conn.close()
 
 
+def _bijeli_mjeseci(conn):
+    """Mjesečne bijeli (net-metering) metrike iz delta registara (A+/A-).
+
+    Vraća listu dictova kronološki. Svaki: uzeto/predano VT+NT, mjesečni račun
+    (pozitivni saldo), otkup viškova i korist PV-a. Korist = netting ušteda
+    (predano smanjuje račun) + otkup viškova — KONZERVATIVNO jer registri ne
+    znaju samopotrošnju (izbjegnutu kupnju iz vlastite proizvodnje), pa je ovo
+    donja granica stvarne koristi.
+    """
+    from datetime import date
+    from ..tariff import izracunaj_racun_bijeli, otkup_viskova_bijeli
+    if not _table_exists(conn, 'hep_registri'):
+        return []
+    rows = conn.execute(
+        "SELECT datum, obis, value FROM hep_registri "
+        "WHERE obis IN ('A+_T1','A+_T2','A-_T1','A-_T2') ORDER BY datum"
+    ).fetchall()
+    stanja = {}
+    for r in rows:
+        stanja.setdefault(r['datum'], {})[r['obis']] = r['value']
+    datumi = sorted(stanja.keys())
+    out = []
+    for prev, cur in zip(datumi, datumi[1:]):
+        s0, s1 = stanja[prev], stanja[cur]
+
+        def d(k):
+            a, b = s0.get(k), s1.get(k)
+            return (b - a) if (a is not None and b is not None and b >= a) else None
+
+        vt_p, nt_p = d('A+_T1'), d('A+_T2')     # uzeto iz mreže (VT/NT)
+        if vt_p is None or nt_p is None:
+            continue
+        vt_pr = d('A-_T1') or 0                  # predano u mrežu (VT/NT)
+        nt_pr = d('A-_T2') or 0
+        try:
+            n_dana = (date(*map(int, cur.split('-'))) -
+                      date(*map(int, prev.split('-')))).days or 30
+        except Exception:
+            n_dana = 30
+        racun = izracunaj_racun_bijeli(vt_p, nt_p, vt_pr, nt_pr, n_dana)
+        otkup = otkup_viskova_bijeli(vt_p, nt_p, vt_pr, nt_pr)
+        bez_predaje = izracunaj_racun_bijeli(vt_p, nt_p, 0, 0, n_dana)['iznos']
+        netting = round(bez_predaje - racun['iznos'], 2)
+        out.append({
+            'mjesec': cur[:7], 'od': prev, 'do': cur, 'n_dana': n_dana,
+            'uzeto_vt': round(vt_p, 2), 'uzeto_nt': round(nt_p, 2),
+            'pred_vt': round(vt_pr, 2), 'pred_nt': round(nt_pr, 2),
+            'uzeto_kwh': round(vt_p + nt_p, 2),
+            'pred_kwh': round(vt_pr + nt_pr, 2),
+            'racun_eur': racun['iznos'],
+            'otkup_eur': otkup['ukupno_eur'],
+            'netting_eur': netting,
+            'korist_eur': round(netting + otkup['ukupno_eur'], 2),
+        })
+    return out
+
+
+@bp.route('/godisnji-saldo')
+def api_godisnji_saldo():
+    """Godišnji (rolling 12 mj) net-metering saldo za bijeli model."""
+    conn = get_db()
+    try:
+        svi = _bijeli_mjeseci(conn)
+        zadnjih12 = svi[-12:]
+        if not zadnjih12:
+            return jsonify({'mjeseci': [], 'total': None})
+
+        def s(k):
+            return round(sum(m[k] for m in zadnjih12), 2)
+
+        uzeto, pred = s('uzeto_kwh'), s('pred_kwh')
+        placeno, otkup = s('racun_eur'), s('otkup_eur')
+        total = {
+            'od': zadnjih12[0]['od'], 'do': zadnjih12[-1]['do'],
+            'n_mjeseci': len(zadnjih12),
+            'uzeto_kwh': uzeto, 'pred_kwh': pred,
+            'neto_saldo_kwh': round(pred - uzeto, 2),
+            'uzeto_vt': s('uzeto_vt'), 'uzeto_nt': s('uzeto_nt'),
+            'pred_vt': s('pred_vt'), 'pred_nt': s('pred_nt'),
+            'placeno_eur': placeno, 'otkup_eur': otkup,
+            'neto_trosak_eur': round(placeno - otkup, 2),
+            'pokrivenost_perc': round(100 * pred / uzeto, 1) if uzeto > 0 else None,
+        }
+        return jsonify({'mjeseci': list(reversed(zadnjih12)), 'total': total})
+    finally:
+        conn.close()
+
+
+@bp.route('/roi')
+def api_roi():
+    """Povrat investicije PV sustava (konzervativno, iz registara).
+
+    Investicija: config PV_INVESTMENT_EUR. Datum puštanja: PV_COMMISSION_DATE.
+    Payback = investicija / godišnja korist (run-rate iz dosad izmjerenih mj.).
+    """
+    conn = get_db()
+    try:
+        try:
+            invest = float(get_config('PV_INVESTMENT_EUR', '') or 0) or None
+        except (ValueError, TypeError):
+            invest = None
+        commission = get_config('PV_COMMISSION_DATE', '') or None
+
+        svi = _bijeli_mjeseci(conn)
+        n_mj = len(svi)
+        korist_ukupno = round(sum(m['korist_eur'] for m in svi), 2)
+        god_korist = round(korist_ukupno / n_mj * 12, 2) if n_mj else None
+        payback_god = (round(invest / god_korist, 1)
+                       if (invest and god_korist and god_korist > 0) else None)
+        pokriveno = round(100 * korist_ukupno / invest, 1) if invest else None
+
+        breakeven = None
+        if commission and payback_god:
+            try:
+                y, m, _ = map(int, commission.split('-'))
+                nm = int(round(payback_god * 12))
+                breakeven = f'{y + (m - 1 + nm) // 12:04d}-{(m - 1 + nm) % 12 + 1:02d}'
+            except Exception:
+                breakeven = None
+
+        return jsonify({
+            'investicija_eur': invest,
+            'commission': commission,
+            'n_mjeseci': n_mj,
+            'korist_ukupno_eur': korist_ukupno,
+            'godisnja_korist_eur': god_korist,
+            'payback_godina': payback_god,
+            'pokriveno_perc': pokriveno,
+            'breakeven_mjesec': breakeven,
+            'mjeseci': list(reversed(svi)),
+        })
+    finally:
+        conn.close()
+
+
 @bp.route('/dug')
 def api_dug():
     """Dug prema HEP-u + sezonska projekcija isplate + cijene u oba smjera."""

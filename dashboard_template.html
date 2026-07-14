@@ -39,6 +39,7 @@
   <div class="tab" onclick="goTo('financije',this)">Financije</div>
   <div class="tab" onclick="goTo('racuni',this)">Računi</div>
   <div class="tab" onclick="goTo('dug',this)">Dug</div>
+  <div class="tab" onclick="goTo('isplativost',this)">Isplativost</div>
   <div class="tab" onclick="goTo('optimalno',this)">Optimalno</div>
   <div class="tab" onclick="goTo('povijest',this)">Povijest</div>
   <div class="tab" onclick="goTo('postavke',this)">⚙️ Postavke</div>
@@ -279,7 +280,7 @@
     <h3>⚡ Aktivne tarife</h3>
     <div style="font-size:13px;color:var(--muted);margin-bottom:10px">
       Cijene i tarifni model dolaze iz HEP-a + tvojih postavki. Za promjene idi u
-      <a href="#" onclick="event.preventDefault();goTo('postavke',document.querySelectorAll('.tab')[7])" style="color:var(--accent)">Postavke → Tarifa</a>.
+      <a href="#" onclick="event.preventDefault();goTo('postavke',document.querySelectorAll('.tab')[8])" style="color:var(--accent)">Postavke → Tarifa</a>.
     </div>
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px" id="cijene-info">
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
@@ -573,6 +574,56 @@
           <th>Razdoblje</th><th>Iznos računa</th><th>Dug</th><th>Δ dug</th><th>Dospijeće</th>
         </tr></thead>
         <tbody id="tDug"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div></div>
+
+<!-- ============ ISPLATIVOST ============ -->
+<div id="page-isplativost" class="page"><div class="wrap">
+
+  <!-- ROI / povrat investicije -->
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-title">💰 Povrat investicije (ROI)</div>
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px">
+      <label style="font-size:13px;color:var(--muted)">Cijena sustava (€)</label>
+      <input type="number" id="roi-invest" placeholder="npr. 12000" step="100"
+             style="width:130px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 8px;color:var(--fg);font-family:var(--mono)">
+      <label style="font-size:13px;color:var(--muted)">Datum puštanja</label>
+      <input type="date" id="roi-commission"
+             style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 8px;color:var(--fg)">
+      <button onclick="spremiRoi()" class="btn" style="padding:6px 14px">Spremi</button>
+      <span id="roi-saved" style="font-size:12px;color:#22c55e"></span>
+    </div>
+    <div class="kpi-strip">
+      <div class="kpi solar"><div class="kpi-lbl">Godišnja korist</div><div class="kpi-val" id="roi-godkorist">—</div><div class="kpi-sub" id="roi-godkorist-sub">run-rate iz mjerenja</div></div>
+      <div class="kpi grn"><div class="kpi-lbl">Povrat za</div><div class="kpi-val" id="roi-payback">—</div><div class="kpi-sub" id="roi-breakeven"></div></div>
+      <div class="kpi acc"><div class="kpi-lbl">Vraćeno dosad</div><div class="kpi-val" id="roi-pokriveno">—</div><div class="kpi-sub" id="roi-korist-sub"></div></div>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin-top:10px">
+      Konzervativna procjena: korist = netting ušteda (predana energija smanjuje
+      račun) + otkup viškova. Ne uključuje samopotrošnju (izbjegnutu kupnju iz
+      vlastite proizvodnje), pa je stvarni povrat brži.
+    </div>
+  </div>
+
+  <!-- Godišnji net-metering saldo -->
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-title">🔄 Godišnji net-metering saldo</div>
+    <div style="font-size:13px;color:var(--muted);margin-bottom:12px" id="saldo-razdoblje">Zadnjih 12 mjeseci</div>
+    <div class="kpi-strip">
+      <div class="kpi cons"><div class="kpi-lbl">Uzeto iz mreže</div><div class="kpi-val" id="saldo-uzeto">—</div><div class="kpi-sub">kWh</div></div>
+      <div class="kpi solar"><div class="kpi-lbl">Predano u mrežu</div><div class="kpi-val" id="saldo-pred">—</div><div class="kpi-sub" id="saldo-pokrivenost"></div></div>
+      <div class="kpi grn"><div class="kpi-lbl">Neto saldo</div><div class="kpi-val" id="saldo-neto">—</div><div class="kpi-sub">predano − uzeto</div></div>
+      <div class="kpi acc"><div class="kpi-lbl">Neto trošak</div><div class="kpi-val" id="saldo-trosak">—</div><div class="kpi-sub">plaćeno − otkup</div></div>
+    </div>
+    <div class="tbl-wrap" style="margin-top:14px">
+      <table>
+        <thead><tr>
+          <th>Mjesec</th><th>Uzeto kWh</th><th>Predano kWh</th><th>Račun</th><th>Otkup</th><th>Korist PV</th>
+        </tr></thead>
+        <tbody id="tSaldo"></tbody>
       </table>
     </div>
   </div>

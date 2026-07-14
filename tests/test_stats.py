@@ -169,3 +169,87 @@ def test_dug_trenutni_vrh(client_dug):
     assert d['trenutni']['dug'] == 600.0
     assert d['vrh']['period'] == '2026-01'
     assert d['vrh']['dug'] == 1000.0
+
+
+@pytest.fixture
+def client_pv(monkeypatch):
+    """Registri s A+/A- za net-metering saldo + ROI, uz investiciju u config."""
+    fd, path = tempfile.mkstemp(suffix='.db')
+    os.close(fd)
+    monkeypatch.setenv('SECRET_KEY', '0123456789abcdef0123456789abcdef')
+
+    conn = sqlite3.connect(path)
+    conn.executescript('''
+        CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT, updated TEXT);
+        INSERT INTO config (key, value) VALUES ('_setup_complete','1');
+        INSERT INTO config (key, value) VALUES ('PV_INVESTMENT_EUR','10000');
+        INSERT INTO config (key, value) VALUES ('PV_COMMISSION_DATE','2026-04-15');
+        CREATE TABLE hep_registri (mjerno_mjesto TEXT, datum TEXT, obis TEXT, value REAL,
+                                   UNIQUE(mjerno_mjesto, datum, obis));
+    ''')
+    # 3 stanja → 2 mjesečne delte
+    #  2026-05: uzeto 300+200=500, predano 300+200=500
+    #  2026-06: uzeto 200+150=350, predano 400+250=650
+    reg = [
+        ('2026-04-30', 1000, 1000, 200, 100),
+        ('2026-05-31', 1300, 1200, 500, 300),
+        ('2026-06-30', 1500, 1350, 900, 550),
+    ]
+    for datum, apt1, apt2, amt1, amt2 in reg:
+        for obis, val in [('A+_T1', apt1), ('A+_T2', apt2), ('A-_T1', amt1), ('A-_T2', amt2)]:
+            conn.execute("INSERT INTO hep_registri VALUES ('OMM1', ?, ?, ?)", (datum, obis, val))
+    conn.commit(); conn.close()
+
+    import hepapp.db as db
+    monkeypatch.setattr(db, 'DB_PATH', path)
+    from app import app
+    app.config.update(TESTING=True)
+    c = app.test_client()
+    with c.session_transaction() as s:
+        s['logged_in'] = True
+        s['uloga'] = 'admin'
+    yield c
+    os.unlink(path)
+
+
+def test_godisnji_saldo(client_pv):
+    d = client_pv.get('/api/stats/godisnji-saldo').get_json()
+    t = d['total']
+    assert len(d['mjeseci']) == 2
+    assert t['uzeto_kwh'] == 850.0     # 500 + 350
+    assert t['pred_kwh'] == 1150.0     # 500 + 650
+    assert t['neto_saldo_kwh'] == 300.0
+    assert t['placeno_eur'] >= 0 and t['otkup_eur'] > 0
+    assert t['neto_trosak_eur'] == round(t['placeno_eur'] - t['otkup_eur'], 2)
+
+
+def test_godisnji_saldo_bez_predaje(client):
+    """Samo A+ registri (nema predaje): pred/otkup/korist su 0, uzeto pozitivno."""
+    d = client.get('/api/stats/godisnji-saldo').get_json()
+    t = d['total']
+    assert t is not None
+    assert t['uzeto_kwh'] == 1000.0    # (1450-1000)+(1550-1000)
+    assert t['pred_kwh'] == 0.0
+    assert t['otkup_eur'] == 0.0
+    assert d['mjeseci'][0]['korist_eur'] == 0.0
+
+
+def test_roi(client_pv):
+    d = client_pv.get('/api/stats/roi').get_json()
+    assert d['investicija_eur'] == 10000.0
+    assert d['commission'] == '2026-04-15'
+    assert d['n_mjeseci'] == 2
+    assert d['korist_ukupno_eur'] > 0
+    assert d['godisnja_korist_eur'] == round(d['korist_ukupno_eur'] / 2 * 12, 2)
+    assert d['payback_godina'] and d['payback_godina'] > 0
+    assert d['pokriveno_perc'] > 0
+    # breakeven = commission (2026-04) + payback*12 mjeseci, format YYYY-MM
+    assert len(d['breakeven_mjesec']) == 7 and d['breakeven_mjesec'][:4].isdigit()
+
+
+def test_roi_bez_investicije(client):
+    """Bez PV_INVESTMENT_EUR: payback/pokriveno su None, ne puca."""
+    d = client.get('/api/stats/roi').get_json()
+    assert d['investicija_eur'] is None
+    assert d['payback_godina'] is None
+    assert d['pokriveno_perc'] is None

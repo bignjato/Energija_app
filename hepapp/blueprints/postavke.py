@@ -19,6 +19,7 @@ DB_ONLY_KEYS = [
     'PV_COMMISSION_DATE',    # YYYY-MM-DD
     'PV_CO2_FACTOR_G_KWH',   # default 640 (HR mix)
     'PV_FEED_TARIFF_EUR',    # cijena otkupa za reimbursement; default = HEP_TARIFA.otkup
+    'PV_INVESTMENT_EUR',     # cijena PV sustava (€) — za ROI / povrat investicije
     'PV_LAT',                # latitude (npr. 45.732 za Odru/Lukavec)
     'PV_LON',                # longitude (npr. 16.087)
     'HA_ENT_POWER_LIMIT',    # entity_id za inverter power limit (W)
@@ -44,6 +45,8 @@ def api_postavke():
         cfg['DASHBOARD_PASSWORD_SET'] = bool(os.environ.get('DASHBOARD_PASSWORD'))
         # DB-only ključevi
         cfg['VT_UDIO_PERC'] = get_config('VT_UDIO_PERC', '45')
+        cfg['PV_INVESTMENT_EUR'] = get_config('PV_INVESTMENT_EUR', '')
+        cfg['PV_COMMISSION_DATE'] = get_config('PV_COMMISSION_DATE', '')
         return jsonify(cfg)
 
     data = request.get_json() or {}

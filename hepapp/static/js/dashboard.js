@@ -31,6 +31,7 @@ function goTo(name,el){
   if(name==='financije') { renderFin(); loadVtNtTrosak(); loadHepStanje(); loadProcjenaTrenutni(); }
   if(name==='racuni'&&!window.RACUNI) loadRacuni();
   if(name==='dug') loadDug();
+  if(name==='isplativost') loadIsplativost();
   if(name==='optimalno'&&!OPT) loadOpt();
   if(name==='povijest'&&!POV) { brziIzbor('30dana'); }
   if(name==='postavke') { loadPostavke(); loadOmmInfo(); }
@@ -1001,6 +1002,63 @@ function _datumZaMjeseci(period, n){
   m = ((m-1)%12)+1;
   const naz=['sij','velj','ožu','tra','svi','lip','srp','kol','ruj','lis','stu','pro'];
   return naz[m-1]+' '+y;
+}
+
+// ---- ISPLATIVOST (ROI + godišnji net-metering saldo) ----
+async function loadIsplativost(){
+  try{
+    const [rRoi, rSaldo] = await Promise.all([
+      fetch('/api/stats/roi'), fetch('/api/stats/godisnji-saldo')
+    ]);
+    renderRoi(await rRoi.json());
+    renderSaldo(await rSaldo.json());
+  }catch(e){ console.error(e); }
+}
+
+function renderRoi(R){
+  if(!R) return;
+  // prefill (ne gazi ako korisnik trenutno tipka)
+  const inv=document.getElementById('roi-invest'), com=document.getElementById('roi-commission');
+  if(inv && document.activeElement!==inv && R.investicija_eur!=null) inv.value=R.investicija_eur;
+  if(com && document.activeElement!==com && R.commission) com.value=R.commission;
+
+  set('roi-godkorist', eur(R.godisnja_korist_eur));
+  set('roi-godkorist-sub', `${R.n_mjeseci||0} mj. mjereno`);
+  set('roi-payback', R.payback_godina!=null ? R.payback_godina.toFixed(1)+' god' : '—');
+  set('roi-breakeven', R.breakeven_mjesec ? 'do '+R.breakeven_mjesec
+       : (R.investicija_eur==null ? 'unesi cijenu sustava' : 'unesi datum puštanja'));
+  set('roi-pokriveno', R.pokriveno_perc!=null ? R.pokriveno_perc.toFixed(0)+' %' : '—');
+  set('roi-korist-sub', `${eur(R.korist_ukupno_eur)} ukupno${R.commission?' od '+R.commission:''}`);
+}
+
+function renderSaldo(S){
+  const tb=document.getElementById('tSaldo');
+  if(!S || !S.total){ if(tb) tb.innerHTML='<tr><td colspan="6" style="color:var(--muted)">Nema registarskih podataka.</td></tr>'; return; }
+  const t=S.total;
+  set('saldo-razdoblje', `${t.od} → ${t.do} · ${t.n_mjeseci} mj.`);
+  set('saldo-uzeto', f0(t.uzeto_kwh)+' kWh');
+  set('saldo-pred', f0(t.pred_kwh)+' kWh');
+  set('saldo-pokrivenost', t.pokrivenost_perc!=null ? `${t.pokrivenost_perc}% pokriveno predajom` : '');
+  set('saldo-neto', sgn(t.neto_saldo_kwh)+f0(t.neto_saldo_kwh)+' kWh');
+  set('saldo-trosak', eur(t.neto_trosak_eur));
+  tb.innerHTML = (S.mjeseci||[]).map(m=>`<tr>
+    <td>${m.mjesec}</td><td>${f0(m.uzeto_kwh)}</td><td>${f0(m.pred_kwh)}</td>
+    <td>${eur(m.racun_eur)}</td><td style="color:#22c55e">${eur(m.otkup_eur)}</td>
+    <td style="color:#22c55e">${eur(m.korist_eur)}</td></tr>`).join('');
+}
+
+async function spremiRoi(){
+  const data={
+    PV_INVESTMENT_EUR: document.getElementById('roi-invest').value,
+    PV_COMMISSION_DATE: document.getElementById('roi-commission').value,
+  };
+  try{
+    const r=await fetch('/api/postavke',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+    if(!r.ok) throw new Error(r.status);
+    set('roi-saved','✓ spremljeno');
+    setTimeout(()=>set('roi-saved',''),2500);
+    loadIsplativost();
+  }catch(e){ set('roi-saved','✗ greška'); console.error(e); }
 }
 
 function renderDugProj(){
