@@ -205,7 +205,8 @@ def parse_vrijednost(v):
         return 0.0
     try:
         return float(str(v).replace(",", "."))
-    except:
+    except (ValueError, TypeError) as e:
+        log.warning("parse_vrijednost: neuspjelo parsiranje %r: %s", v, e)
         return 0.0
 
 

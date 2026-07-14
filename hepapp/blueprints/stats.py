@@ -94,7 +94,8 @@ def api_usporedba():
                     'sma_predaja':     t['feed'] or 0,
                     'sma_mreza':       grid,
                     'sma_potrosnja':   cons,
-                    'autarky_rate':    round(1 - grid/cons, 4) if cons > 0 else None,
+                    # prag 0.1 kWh: pri zanemarivoj potrošnji autarkija je čisti šum
+                    'autarky_rate':    round(1 - grid/cons, 4) if cons > 0.1 else None,
                 }
         if sma_today is None and has_sma_live:
             t = conn.execute("""
