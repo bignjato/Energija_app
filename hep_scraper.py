@@ -12,7 +12,7 @@ import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
-BASE_URL = "https://mjerenje.hep.hr/mjerenja/v1"
+BASE_URL = "https://mjerenje.hep.hr/mjerenja/v1.1"
 DB_PATH  = Path(os.getenv("DB_PATH", str(Path(__file__).parent / "hep_energy.db")))
 LOG_PATH = Path(__file__).parent / "hep_scraper.log"
 USERNAME = os.getenv("HEP_USERNAME", "vas_korisnik@email.com")
