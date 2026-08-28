@@ -77,7 +77,7 @@ while true; do
         echo "[daily] SMA history import..." | tee -a "$LOG"
         sma_history
         run python /app/maintenance.py --prune-live --keep-days 45 --bill-reminder \
-            --restore-drill --check-offsite --check-token-age
+            --restore-drill --check-offsite --check-token-age --check-inverter
     fi
 
     # Backup baze jednom dnevno nakon 02:00. Marker datoteka umjesto COUNTER

@@ -99,6 +99,16 @@ def collect(conn):
         out['trosak_danas'] = None
         out['autarkija_danas'] = None
 
+    # --- Po-inverterski dnevni prinos (danas) ---
+    inv = conn.execute("SELECT pv_kwh_inv1 i1, pv_kwh_inv2 i2 FROM sma_dnevna WHERE datum=?",
+                       (dan,)).fetchone()
+    if inv and (inv['i1'] or inv['i2']):
+        out['inv1_danas'] = round(inv['i1'] or 0, 2)
+        out['inv2_danas'] = round(inv['i2'] or 0, 2)
+    else:
+        out['inv1_danas'] = None
+        out['inv2_danas'] = None
+
     return out
 
 
@@ -127,6 +137,10 @@ def push(ha, vals):
     s('sensor.energija_vt_udio', vals.get('vt_udio'), '%', 'VT udio', 'mdi:chart-pie')
     s('sensor.energija_autarkija_danas', vals.get('autarkija_danas'), '%', 'Autarkija danas',
       'mdi:home-lightning-bolt')
+    s('sensor.energija_inv1_danas', vals.get('inv1_danas'), 'kWh', 'Inverter 1 danas',
+      'mdi:solar-panel', 'energy')
+    s('sensor.energija_inv2_danas', vals.get('inv2_danas'), 'kWh', 'Inverter 2 danas',
+      'mdi:solar-panel', 'energy')
 
 
 def main():

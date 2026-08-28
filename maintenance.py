@@ -523,6 +523,65 @@ def check_token_age(conn, max_age_days=90):
     return True
 
 
+def check_inverter_balance(conn, threshold_pp=None, min_day_kwh=None):
+    """Alarm ako se udio jednog invertera u dnevnoj proizvodnji znacajno
+    promijeni u odnosu na povijesni baseline (pokvareni string/MPPT/panel).
+
+    Kapacitet-agnosticno: gleda udio INV1 = inv1/(inv1+inv2). Taj udio je
+    stabilan (~konstantan) dok su oba invertera zdrava; nagli pomak znaci da
+    jedan podbacuje. Baseline = medijan udjela zadnjih 60 dobrih dana.
+    Okida na zadnji KOMPLETAN dan (ne danas), samo iznad min_day_kwh (da nema
+    laznih alarma po oblacnim danima), max jednom po datumu.
+    """
+    if threshold_pp is None:
+        try: threshold_pp = float(os.environ.get('INV_BALANCE_THRESHOLD_PP', '8'))
+        except ValueError: threshold_pp = 8.0
+    if min_day_kwh is None:
+        try: min_day_kwh = float(os.environ.get('INV_BALANCE_MIN_KWH', '20'))
+        except ValueError: min_day_kwh = 20.0
+
+    row = conn.execute(
+        "SELECT datum, pv_kwh_inv1 i1, pv_kwh_inv2 i2 FROM sma_dnevna "
+        "WHERE datum < date('now') AND pv_kwh_inv1 > 0 AND pv_kwh_inv2 > 0 "
+        "ORDER BY datum DESC LIMIT 1").fetchone()
+    if not row:
+        log.info('check_inverter_balance: nema po-inverterskih podataka')
+        return False
+    datum, i1, i2 = row['datum'], row['i1'], row['i2']
+    tot = i1 + i2
+    if tot < min_day_kwh:
+        log.info('check_inverter_balance: %s premalo proizvodnje (%.1f kWh)', datum, tot)
+        return False
+    share1 = i1 / tot * 100
+
+    base = conn.execute(
+        "SELECT pv_kwh_inv1*100.0/(pv_kwh_inv1+pv_kwh_inv2) s FROM sma_dnevna "
+        "WHERE datum < ? AND pv_kwh_inv1 > 0 AND pv_kwh_inv2 > 0 "
+        "AND (pv_kwh_inv1+pv_kwh_inv2) >= ? ORDER BY datum DESC LIMIT 60",
+        (datum, min_day_kwh)).fetchall()
+    if len(base) < 10:
+        log.info('check_inverter_balance: premalo referentnih dana (%d)', len(base))
+        return False
+    shares = sorted(x['s'] for x in base)
+    med = shares[len(shares) // 2]
+    dev = share1 - med
+    log.info('check_inverter_balance: %s INV1 %.1f%% (baseline %.1f%%, dev %+.1f pp)',
+             datum, share1, med, dev)
+    if abs(dev) < threshold_pp:
+        return False
+    if _get_cfg(conn, '_inv_balance_last_date') == datum:
+        log.info('check_inverter_balance: %s vec javljen', datum)
+        return False
+    _set_cfg(conn, '_inv_balance_last_date', datum)
+    losi = 'INV1' if dev < 0 else 'INV2'
+    poruka = (f'Inverter disbalans {datum}: INV1={i1:.1f} kWh ({share1:.0f}%), '
+              f'INV2={i2:.1f} kWh ({100-share1:.0f}%). {losi} podbacuje '
+              f'(INV1 normalno ~{med:.0f}%). Provjeri string/MPPT/panele/zasjenjenje.')
+    log.warning(poruka)
+    ha_notify('Energetski Monitor — inverter', poruka)
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--all', action='store_true')
@@ -533,6 +592,7 @@ def main():
     ap.add_argument('--backfill-range', nargs=2, metavar=('OD', 'DO'))
     ap.add_argument('--check-freshness', action='store_true')
     ap.add_argument('--check-anomaly', action='store_true')
+    ap.add_argument('--check-inverter', action='store_true')
     ap.add_argument('--bill-reminder', action='store_true')
     ap.add_argument('--restore-drill', action='store_true')
     ap.add_argument('--check-offsite', action='store_true')
@@ -553,6 +613,8 @@ def main():
             check_freshness(conn)
         if a.all or a.check_anomaly:
             check_anomaly(conn)
+        if a.all or a.check_inverter:
+            check_inverter_balance(conn)
         if a.all or a.bill_reminder:
             bill_reminder(conn)
         if a.all or a.restore_drill:
