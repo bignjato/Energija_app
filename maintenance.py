@@ -178,7 +178,7 @@ def backfill_range(conn, od, do):
 
 
 # ---------- HA notifikacije ----------
-def ha_notify(title, message):
+def _ha_send(title, message):
     """Posalji HA notifikaciju. Vraca True ako je poslana."""
     import requests
     from netutil import ha_verify
@@ -186,18 +186,59 @@ def ha_notify(title, message):
     token  = os.environ.get('HA_TOKEN', '').strip()
     notify = os.environ.get('HA_NOTIFY_SERVICE', 'notify/persistent_notification')
     if not ha_url or not token:
-        log.error('ha_notify: HA_URL/HA_TOKEN nisu postavljeni — preskacem notifikaciju')
+        log.info('_ha_send: HA nije konfiguriran — preskacem')
         return False
     try:
         r = requests.post(f'{ha_url}/api/services/{notify}',
                           headers={'Authorization': f'Bearer {token}'},
                           json={'title': title, 'message': message},
                           timeout=15, verify=ha_verify())
-        log.info('ha_notify: %s -> %s', notify, r.status_code)
+        log.info('_ha_send: %s -> %s', notify, r.status_code)
         return r.ok
     except Exception as e:
-        log.error('ha_notify greska: %s', e)
+        log.warning('_ha_send greska: %s', e)
         return False
+
+
+def _tg_send(title, message):
+    """Posalji Telegram poruku (neovisno o HA). Vraca True ako je poslana.
+
+    Kredencijali iz env-a: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
+    """
+    import requests
+    tok  = os.environ.get('TELEGRAM_BOT_TOKEN', '').strip()
+    chat = os.environ.get('TELEGRAM_CHAT_ID', '').strip()
+    if not tok or not chat:
+        log.info('_tg_send: TELEGRAM_BOT_TOKEN/CHAT_ID nisu postavljeni — preskacem')
+        return False
+    text = f'\u26a1 *{title}*\n{message}'
+    try:
+        r = requests.post(f'https://api.telegram.org/bot{tok}/sendMessage',
+                          json={'chat_id': chat, 'text': text,
+                                'parse_mode': 'Markdown',
+                                'disable_web_page_preview': True},
+                          timeout=15)
+        log.info('_tg_send: -> %s', r.status_code)
+        if not r.ok:
+            log.warning('_tg_send body: %s', r.text[:150])
+        return r.ok
+    except Exception as e:
+        log.warning('_tg_send greska: %s', e)
+        return False
+
+
+def ha_notify(title, message):
+    """Fan-out alert na SVE dostupne kanale (HA + Telegram).
+
+    Ime zadrzano radi kompatibilnosti sa svim pozivateljima. Telegram je
+    neovisan o HA-u pa alert stize i kad je HA server dolje. Vraca True ako
+    je barem jedan kanal uspio.
+    """
+    ha = _ha_send(title, message)
+    tg = _tg_send(title, message)
+    if not (ha or tg):
+        log.warning('ha_notify: nijedan kanal nije dostupan (HA+Telegram)')
+    return ha or tg
 
 
 def _get_cfg(conn, key, default=''):
