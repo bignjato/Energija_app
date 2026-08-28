@@ -1,0 +1,126 @@
+# =====================================================================
+#  Energetski Monitor — HA Lovelace kartica
+#  Senzore gura aplikacija (ha_push_intel.py) svakih 5 min.
+#  Ubaci preko: Dashboard → Uredi → tri točkice → "Uredi u YAML-u"
+#  (ili dodaj kao novi "Vertical stack" ručno i zalijepi karticu po karticu).
+# =====================================================================
+type: vertical-stack
+cards:
+  # ---- Naslov ----
+  - type: markdown
+    content: "## ⚡ Energetski monitor"
+
+  # ---- Live tokovi (HA-ovi vlastiti SMA senzori) ----
+  - type: glance
+    title: Uživo
+    columns: 3
+    entities:
+      - entity: sensor.pv_snaga_ukupno
+        name: PV snaga
+      - entity: sensor.solari_home_manager_2_metering_power_supplied
+        name: Predaja
+      - entity: sensor.solari_home_manager_2_metering_power_absorbed
+        name: Iz mreže
+
+  # ---- Solarni višak + isplati li se trošiti ----
+  - type: gauge
+    entity: sensor.energija_solarni_visak
+    name: Solarni višak
+    unit: W
+    min: 0
+    max: 20000
+    severity:
+      green: 2000
+      yellow: 500
+      red: 0
+  - type: entities
+    entities:
+      - entity: binary_sensor.energija_isplati_se_trositi
+        name: Isplati se trošiti sada
+      - entity: sensor.energija_autarkija_danas
+        name: Autarkija danas
+
+  # ---- Financije ----
+  - type: entities
+    title: Financije
+    entities:
+      - entity: sensor.energija_dug
+        name: Dug prema HEP-u
+        icon: mdi:cash-minus
+      - entity: sensor.energija_trosak_mjesec
+        name: Trošak ovaj mjesec
+      - entity: sensor.energija_trosak_danas
+        name: Trošak danas
+      - entity: sensor.energija_vt_udio
+        name: VT udio
+
+  # ---- Po-inverterski prinos ----
+  - type: glance
+    title: Inverteri (danas)
+    columns: 2
+    entities:
+      - entity: sensor.energija_inv1_danas
+        name: Inverter 1
+      - entity: sensor.energija_inv2_danas
+        name: Inverter 2
+
+  # ---- Graf viška kroz dan ----
+  - type: history-graph
+    title: Solarni višak (24 h)
+    hours_to_show: 24
+    entities:
+      - sensor.energija_solarni_visak
+
+
+# =====================================================================
+#  AUTOMATIZACIJE — ide u Settings → Automations → "Edit in YAML"
+#  (svaka kao zasebna automatizacija), NE u Lovelace.
+#
+#  Logika: trošilo se pali kad ima DOVOLJNO viška da ga pokrije, i gasi
+#  kad višak padne. Prag paljenja MORA biti veći od snage trošila —
+#  inače čim se upali, potroši višak i odmah bi se ugasio.
+#  Zamijeni switch.shellyplus1pm_..._grijanje svojim bojlerom/trošilom
+#  i prag 2500 W snagom tog trošila (npr. bojler 2 kW → prag ~2200).
+# =====================================================================
+
+# --- 1) UPALI kad ima viška ---
+alias: Solar - upali grijanje kad ima viška
+description: Pali trošilo kad solarni višak nadmaši njegovu snagu 10 min zaredom
+mode: single
+triggers:
+  - trigger: numeric_state
+    entity_id: sensor.energija_solarni_visak
+    above: 2500
+    for: "00:10:00"
+conditions:
+  - condition: state
+    entity_id: switch.shellyplus1pm_4855199a7944_hodnik_dolje_grijanje
+    state: "off"
+actions:
+  - action: switch.turn_on
+    target:
+      entity_id: switch.shellyplus1pm_4855199a7944_hodnik_dolje_grijanje
+  - action: notify.persistent_notification
+    data:
+      title: "☀️ Solar"
+      message: "Višak {{ states('sensor.energija_solarni_visak') }} W — palim grijanje."
+
+---
+
+# --- 2) UGASI kad nestane viška ---
+alias: Solar - ugasi grijanje kad nema viška
+description: Gasi trošilo kad višak padne ispod 300 W 10 min zaredom
+mode: single
+triggers:
+  - trigger: numeric_state
+    entity_id: sensor.energija_solarni_visak
+    below: 300
+    for: "00:10:00"
+conditions:
+  - condition: state
+    entity_id: switch.shellyplus1pm_4855199a7944_hodnik_dolje_grijanje
+    state: "on"
+actions:
+  - action: switch.turn_off
+    target:
+      entity_id: switch.shellyplus1pm_4855199a7944_hodnik_dolje_grijanje
