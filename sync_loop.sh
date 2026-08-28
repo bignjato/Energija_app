@@ -61,6 +61,7 @@ while true; do
     sleep 300
     COUNTER=$((COUNTER + 1))
     sma_recent
+    run python /app/ha_push_intel.py
 
     # HEP + HA svakih sat (12 × 5min)
     if [ $((COUNTER % 12)) -eq 0 ]; then

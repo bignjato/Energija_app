@@ -252,7 +252,7 @@ def pull_today():
             feed_in_kwh          = COALESCE(excluded.feed_in_kwh, sma_dnevna.feed_in_kwh),
             grid_consumption_kwh = COALESCE(excluded.grid_consumption_kwh, sma_dnevna.grid_consumption_kwh),
             total_consumption_kwh= COALESCE(excluded.total_consumption_kwh, sma_dnevna.total_consumption_kwh)
-    ''', (today, pv_kwh, feed_kwh, cons_kwh, grid_kwh))
+    ''', (today, pv_kwh, feed_kwh, grid_kwh, cons_kwh))
     conn.commit()
     conn.close()
     log.info('HA pull today: PV=%s kWh, feed=%s kWh, cons=%s kWh, grid=%s kWh',
