@@ -70,6 +70,29 @@ def init_db(conn):
     log.info("Baza inicijalizirana: %s", DB_PATH)
 
 
+def detect_base_url():
+    """Otkrij trenutni API prefiks iz HEP SPA bundle-a.
+
+    HEP povremeno mijenja verziju puta (v1 -> v1.1 -> ...), sto obara login
+    (404/405). Ova funkcija procita apiUrl iz JS bundle-a i vrati npr.
+    'https://mjerenje.hep.hr/mjerenja/v1.1'. Vraca None ako ne uspije.
+    """
+    import re
+    try:
+        s = requests.Session()
+        s.headers.update({"User-Agent": "Mozilla/5.0"})
+        idx = s.get("https://mjerenje.hep.hr/mjerenja/", timeout=15).text
+        for f in set(re.findall(r'(main[.-][A-Za-z0-9_]+\.js)', idx)):
+            t = s.get("https://mjerenje.hep.hr/mjerenja/" + f, timeout=20).text
+            for u in re.findall(r'apiUrl\s*[=:]\s*["\']([^"\']+)["\']', t):
+                m = re.match(r'(v[0-9.]+)/api/?', u)
+                if m:
+                    return "https://mjerenje.hep.hr/mjerenja/" + m.group(1)
+    except Exception as e:
+        log.warning("detect_base_url: %s", e)
+    return None
+
+
 class HEPSession:
     def __init__(self):
         from netutil import retry_session
@@ -88,17 +111,21 @@ class HEPSession:
 
     def login(self, username, password):
         log.info("Prijava: %s", username)
-        try:
-            r = self.session.post(
-                f"{BASE_URL}/api/user/login",
-                json={"Username": username, "Password": password},
-                timeout=15
-            )
+        global BASE_URL
+        for attempt in (1, 2):
+            try:
+                r = self.session.post(
+                    f"{BASE_URL}/api/user/login",
+                    json={"Username": username, "Password": password},
+                    timeout=15
+                )
+            except Exception as e:
+                log.error("Greska pri prijavi: %s", e)
+                return False
             if r.status_code == 200:
                 data = r.json()
-                # Novi API (od ~lipnja 2026): response je list kupac-objekata;
-                # auth ide preko Set-Cookie 'accessToken' (session ga drzi).
-                # Stari oblik bio je {"Token": ..., "KupacList": [...]} -> fallback.
+                # Novi API: response je list kupac-objekata; auth preko
+                # Set-Cookie 'accessToken'. Stari: {"Token":..,"KupacList":..}.
                 if isinstance(data, list):
                     self.kupci = data
                     self.token = self.session.cookies.get("accessToken")
@@ -110,11 +137,16 @@ class HEPSession:
                 self.logged_in = True
                 log.info("Prijava uspjesna! Kupaca: %d", len(self.kupci))
                 return True
+            # 404/405 = promijenjen API path/verzija -> auto-detekcija + retry
+            if r.status_code in (404, 405) and attempt == 1:
+                det = detect_base_url()
+                if det and det != BASE_URL:
+                    log.warning("HEP API verzija promijenjena: %s -> %s", BASE_URL, det)
+                    BASE_URL = det
+                    continue
             log.error("Prijava neuspjesna: %s %s", r.status_code, r.text[:200])
             return False
-        except Exception as e:
-            log.error("Greska pri prijavi: %s", e)
-            return False
+        return False
 
     def get_mjerna_mjesta(self):
         mjesta = []
