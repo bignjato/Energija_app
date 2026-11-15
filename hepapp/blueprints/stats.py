@@ -3,7 +3,7 @@
 from flask import Blueprint, jsonify, request
 
 from ..db import get_config, get_db
-from ..tariff import HEP_TARIFA, izracunaj_racun
+from ..tariff import HEP_TARIFA, get_tarifa, izracunaj_racun
 
 bp = Blueprint('stats', __name__, url_prefix='/api/stats')
 
@@ -251,9 +251,12 @@ def _bijeli_mjeseci(conn):
                       date(*map(int, prev.split('-')))).days or 30
         except Exception:
             n_dana = 30
-        racun = izracunaj_racun_bijeli(vt_p, nt_p, vt_pr, nt_pr, n_dana)
-        otkup = otkup_viskova_bijeli(vt_p, nt_p, vt_pr, nt_pr)
-        bez_predaje = izracunaj_racun_bijeli(vt_p, nt_p, 0, 0, n_dana)['iznos']
+        # HEP fiksne naknade naplaćuje po mjesecu (ne po danu): puni mjesec = 30
+        dana_obr = 30 if 28 <= n_dana <= 31 else n_dana
+        # povijesni mjesec -> cjenik koji je tada vrijedio
+        racun = izracunaj_racun_bijeli(vt_p, nt_p, vt_pr, nt_pr, dana_obr, datum=cur)
+        otkup = otkup_viskova_bijeli(vt_p, nt_p, vt_pr, nt_pr, datum=cur)
+        bez_predaje = izracunaj_racun_bijeli(vt_p, nt_p, 0, 0, dana_obr, datum=cur)['iznos']
         netting = round(bez_predaje - racun['iznos'], 2)
         out.append({
             'mjesec': cur[:7], 'od': prev, 'do': cur, 'n_dana': n_dana,
@@ -399,6 +402,8 @@ def api_dug():
                 vt_pr, nt_pr = d("A-_T1"), d("A-_T2")
                 if vt_p is None or nt_p is None:
                     continue
+                # Namjerno trenutni cjenik (bez datum=): ovo je projekcija BUDUĆIH
+                # računa iz povijesne potrošnje, ne rekonstrukcija starih.
                 racun = izracunaj_racun_bijeli(vt_p, nt_p, vt_pr or 0, nt_pr or 0, 30)
                 mes = int(cur[5:7])
                 po_kal.setdefault(mes, []).append(racun["iznos"])
@@ -546,11 +551,12 @@ def api_mjesecni():
             # sluzbeni VT udio za taj mjesec iz registara; fallback slider/prosjek
             vt_u = reg_udjeli.get(r['mjesec']) or reg_prosjek
             r['vt_udio_registri'] = round(vt_u * 100, 1) if vt_u is not None else None
-            r['procj_racun'] = izracunaj_racun(kp, km, n, vt_udio=vt_u)
+            r['procj_racun'] = izracunaj_racun(kp, km, n, vt_udio=vt_u, datum=r['mjesec'])
             vt_eff = vt_u if vt_u is not None else 0.45
+            t_mj = get_tarifa(r['mjesec'])
             r['procj_trosak_neto'] = round(
-                kp * (HEP_TARIFA['vt_opskrba'] * vt_eff + HEP_TARIFA['nt_opskrba'] * (1 - vt_eff)) -
-                km * HEP_TARIFA['otkup'], 2)
+                kp * (t_mj['vt_opskrba'] * vt_eff + t_mj['nt_opskrba'] * (1 - vt_eff)) -
+                km * t_mj['otkup'], 2)
             if has_sma:
                 sma = sma_po_mj.get(r['mjesec'])
                 r['sma_pv']        = sma['pv'] if sma else None

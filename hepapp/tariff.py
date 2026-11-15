@@ -9,25 +9,73 @@ VT_UDIO_PERC se može override-ati preko config tablice (key: VT_UDIO_PERC, 0–
 Tipično: ljeto ~35, prosjek ~45, zima ~55.
 """
 
+from datetime import date, datetime
+
 from .db import get_config
 
-HEP_TARIFA = {
-    'vt_opskrba':  0.131205,
-    'nt_opskrba':  0.064379,
+# Stavke koje se nisu mijenjale između cjenika (mreža, naknade, PDV).
+_ZAJEDNICKO = {
     'vt_distrib':  0.044446,
     'nt_distrib':  0.020514,
     'vt_prijenos': 0.021256,
     'nt_prijenos': 0.008175,
-    'solidarna':   0.003982,
+    'solidarna':   0.003982,   # obračunava se pa u cijelosti vraća ("popust na solidarnu naknadu")
     'oie':         0.013239,
     'opskrbna_mj': 0.982,
     'mjerna_mj':   1.983,
     'pdv':         0.13,
     'vt_udio':     0.45,  # default za standardni model (može se promijeniti u Postavkama)
-    'otkup':       0.064379,    # default otkup (standardni model)
-    'vt_otkup':    0.104964,    # HEPI bijeli: otkup VT viškova
-    'nt_otkup':    0.064379,    # HEPI bijeli: otkup NT viškova
 }
+
+# Cjenici po datumu važenja — NAJNOVIJI PRVI. Kad HEP promijeni cijene, dodaj
+# novi red na vrh (ne mijenjaj stare: povijesni mjeseci se računaju po cjeniku
+# koji je tada vrijedio). Svaki cjenik je provjeren protiv stvarnog računa —
+# vidi tests/test_tariff.py (test_stvarni_racun_*).
+TARIFE = [
+    # Od 1.4.2026. — potvrđeno računima 04–10/2026 (npr. 10/2026: 63,39 €).
+    ('2026-04-01', {
+        **_ZAJEDNICKO,
+        'vt_opskrba': 0.077751,
+        'nt_opskrba': 0.047688,
+        # Otkup VT viška = puna VT cijena opskrbe (račun 10/2026: 546 kWh → 42,45 €).
+        'vt_otkup':   0.077751,
+        'nt_otkup':   0.047688,   # pretpostavka po analogiji — NT viška na računima još nije bilo
+        'otkup':      0.077751,   # standardni model: solarni višak nastaje u VT satima
+    }),
+    # Do 31.3.2026. — potvrđeno računima 01–03/2026 (npr. 03/2026: opskrba 49,18 €).
+    ('1900-01-01', {
+        **_ZAJEDNICKO,
+        'vt_opskrba': 0.131205,
+        'nt_opskrba': 0.064379,
+        'vt_otkup':   0.104964,
+        'nt_otkup':   0.064379,
+        'otkup':      0.064379,
+    }),
+]
+
+
+def get_tarifa(datum=None) -> dict:
+    """Cjenik koji vrijedi na zadani datum.
+
+    datum: None (danas), 'YYYY-MM-DD', 'YYYY-MM' (uzima se 1. u mjesecu),
+           ili date/datetime objekt.
+    """
+    if datum is None:
+        d = date.today().isoformat()
+    elif isinstance(datum, (date, datetime)):
+        d = datum.strftime('%Y-%m-%d')
+    else:
+        d = str(datum)[:10]
+        if len(d) == 7:
+            d += '-01'
+    for vrijedi_od, cjenik in TARIFE:
+        if d >= vrijedi_od:
+            return cjenik
+    return TARIFE[-1][1]
+
+
+# Trenutno važeći cjenik (kompatibilnost sa starim pozivateljima).
+HEP_TARIFA = get_tarifa()
 
 
 def get_vt_udio() -> float:
@@ -85,9 +133,12 @@ def get_tariff_model() -> str:
     return (get_config('TARIFA_MODEL', 'standardni') or 'standardni').lower()
 
 
-def izracunaj_racun(kwh_plus, kwh_minus, n_dana=30, vt_udio=None):
-    """Standardni dvotarifni model — približna formula s VT_UDIO slider-om."""
-    t = HEP_TARIFA
+def izracunaj_racun(kwh_plus, kwh_minus, n_dana=30, vt_udio=None, datum=None):
+    """Standardni dvotarifni model — približna formula s VT_UDIO slider-om.
+
+    datum: po kojem cjeniku računati (None = trenutni); vidi `get_tarifa`.
+    """
+    t = get_tarifa(datum)
     if vt_udio is None:
         vt_udio = get_vt_udio()
     vt = kwh_plus * vt_udio
@@ -97,14 +148,18 @@ def izracunaj_racun(kwh_plus, kwh_minus, n_dana=30, vt_udio=None):
                kwh_plus * (t['solidarna'] + t['oie']) +
                t['opskrbna_mj'] * n_mj -
                kwh_minus * t['otkup'])
+    # Popust na solidarnu naknadu — na računu se obračuna pa u cijelosti vrati.
+    opskrba -= kwh_plus * t['solidarna']
     mreza = (vt * (t['vt_distrib'] + t['vt_prijenos']) +
              nt * (t['nt_distrib'] + t['nt_prijenos']) +
              t['mjerna_mj'] * n_mj)
     return round((opskrba + mreza) * (1 + t['pdv']), 2)
 
 
-def izracunaj_racun_bijeli(vt_pot, nt_pot, vt_pred, nt_pred, n_dana=30):
+def izracunaj_racun_bijeli(vt_pot, nt_pot, vt_pred, nt_pred, n_dana=30, datum=None):
     """HEPI bijeli (net-metering) formula.
+
+    datum: po kojem cjeniku računati (None = trenutni); vidi `get_tarifa`.
 
     Mjesečno saldiranje po tarifi:
         saldo_vt = vt_pot - vt_pred   (pozitivno = neto kupili VT)
@@ -119,7 +174,7 @@ def izracunaj_racun_bijeli(vt_pot, nt_pot, vt_pred, nt_pred, n_dana=30):
         opskrba, mreza, pdv  — komponente
         saldo_vt, saldo_nt
     """
-    t = HEP_TARIFA
+    t = get_tarifa(datum)
     saldo_vt = (vt_pot or 0) - (vt_pred or 0)
     saldo_nt = (nt_pot or 0) - (nt_pred or 0)
     pos_vt = max(0, saldo_vt)
@@ -157,12 +212,13 @@ def izracunaj_racun_bijeli(vt_pot, nt_pot, vt_pred, nt_pred, n_dana=30):
     }
 
 
-def otkup_viskova_bijeli(vt_pot, nt_pot, vt_pred, nt_pred):
+def otkup_viskova_bijeli(vt_pot, nt_pot, vt_pred, nt_pred, datum=None):
     """Otkup za HEPI bijeli — viškovi (negativni saldo) × otkupna cijena.
 
+    datum: po kojem cjeniku računati (None = trenutni); vidi `get_tarifa`.
     Vraća dict: vt_kwh, nt_kwh, vt_eur, nt_eur, ukupno_eur.
     """
-    t = HEP_TARIFA
+    t = get_tarifa(datum)
     vt_visak = max(0, (vt_pred or 0) - (vt_pot or 0))
     nt_visak = max(0, (nt_pred or 0) - (nt_pot or 0))
     vt_eur = round(vt_visak * t['vt_otkup'], 2)

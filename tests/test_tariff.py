@@ -6,6 +6,8 @@ import pytest
 
 from hepapp.tariff import (
     HEP_TARIFA,
+    TARIFE,
+    get_tarifa,
     get_vt_udio_registri,
     izracunaj_racun,
     izracunaj_racun_bijeli,
@@ -14,8 +16,88 @@ from hepapp.tariff import (
 
 
 def test_izracunaj_racun_standardni():
-    # 1000 kWh, bez predaje, 30 dana, VT udio 45% — rucno izracunata vrijednost
-    assert izracunaj_racun(1000, 0, 30, vt_udio=0.45) == pytest.approx(180.78, abs=0.01)
+    # 1000 kWh, bez predaje, 30 dana, VT udio 45% — rucno izracunate vrijednosti
+    # (solidarna naknada se obracuna pa u cijelosti vrati -> ne ulazi u iznos)
+    # stari cjenik (do 31.3.2026.)
+    assert izracunaj_racun(1000, 0, 30, vt_udio=0.45, datum='2026-01-15') == pytest.approx(176.28, abs=0.01)
+    # cjenik od 1.4.2026.
+    assert izracunaj_racun(1000, 0, 30, vt_udio=0.45, datum='2026-10-15') == pytest.approx(138.72, abs=0.01)
+
+
+def test_standardni_solidarna_se_vraca():
+    # iznos ne smije ovisiti o visini solidarne naknade (popust je simetrican)
+    t = get_tarifa('2026-10-15')
+    bez_naknada = (450 * (t['vt_opskrba'] + t['vt_distrib'] + t['vt_prijenos']) +
+                   550 * (t['nt_opskrba'] + t['nt_distrib'] + t['nt_prijenos']) +
+                   1000 * t['oie'] + t['opskrbna_mj'] + t['mjerna_mj'])
+    assert izracunaj_racun(1000, 0, 30, vt_udio=0.45, datum='2026-10-15') == \
+        pytest.approx(bez_naknada * (1 + t['pdv']), abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# Cjenici po datumu
+# ---------------------------------------------------------------------------
+
+def test_get_tarifa_po_datumu():
+    assert get_tarifa('2026-03-31')['nt_opskrba'] == 0.064379
+    assert get_tarifa('2026-04-01')['nt_opskrba'] == 0.047688
+    assert get_tarifa('2026-03')['vt_opskrba'] == 0.131205      # 'YYYY-MM'
+    assert get_tarifa('2026-04')['vt_opskrba'] == 0.077751
+    assert get_tarifa('2019-01-01') is TARIFE[-1][1]            # prije svega -> najstariji
+    from datetime import date
+    assert get_tarifa(date(2026, 10, 31))['vt_otkup'] == 0.077751
+
+
+def test_tarife_su_sortirane_i_potpune():
+    datumi = [d for d, _ in TARIFE]
+    assert datumi == sorted(datumi, reverse=True), 'TARIFE mora biti najnoviji prvi'
+    kljucevi = set(TARIFE[0][1])
+    for d, cjenik in TARIFE:
+        assert set(cjenik) == kljucevi, f'cjenik {d} nema iste kljuceve'
+    assert HEP_TARIFA is get_tarifa()
+
+
+# ---------------------------------------------------------------------------
+# Regresija protiv STVARNIH HEP racuna (model HEPI bijeli, OMM 0149216862).
+# Ako ovi testovi padnu nakon izmjene cijena/formule — izracun se razisao
+# od onoga sto HEP stvarno naplacuje. Tolerancija 5 centi pokriva HEP-ovo
+# zaokruzivanje po stavci.
+# ---------------------------------------------------------------------------
+
+STVARNI_RACUNI = [
+    # (period, vt_pot, nt_pot, vt_pred, nt_pred, opskrba, mreza, iznos)
+    # 03/2026 — zadnji mjesec starog cjenika. `iznos` na racunu (79,10) ukljucuje
+    # i stavku izvan opskrbe/mreze, pa se ovdje provjeravaju samo komponente.
+    ('2026-03', 549, 622, 1507, 1, 49.18, 19.80, None),
+    # 06/2026 — novi cjenik
+    ('2026-06', 295, 480, 2740, 125, 22.61, 12.16, 39.29),
+    # 10/2026 — novi cjenik; racun br. 0010288297-261020-8
+    ('2026-10', 533, 595, 1079, 2, 37.11, 18.99, 63.39),
+]
+
+
+@pytest.mark.parametrize('period,vt_pot,nt_pot,vt_pred,nt_pred,opskrba,mreza,iznos', STVARNI_RACUNI)
+def test_stvarni_racun_bijeli(period, vt_pot, nt_pot, vt_pred, nt_pred, opskrba, mreza, iznos):
+    r = izracunaj_racun_bijeli(vt_pot, nt_pot, vt_pred, nt_pred, 30, datum=period)
+    assert r['opskrba'] == pytest.approx(opskrba, abs=0.05)
+    assert r['mreza'] == pytest.approx(mreza, abs=0.05)
+    if iznos is not None:
+        assert r['iznos'] == pytest.approx(iznos, abs=0.05)
+
+
+def test_stvarni_otkup_listopad_2026():
+    # "U listopadu smo od Vas otkupili 546 kWh elektricne energije - za 42,45 eura."
+    o = otkup_viskova_bijeli(533, 595, 1079, 2, datum='2026-10')
+    assert o['vt_kwh'] == 546
+    assert o['nt_kwh'] == 0
+    assert o['ukupno_eur'] == pytest.approx(42.45, abs=0.01)
+
+
+def test_stari_cjenik_bi_precijenio_novi_racun():
+    # cuvar: racun 10/2026 po starom cjeniku ispada ~18 % skuplji — upravo
+    # greska koju je datumsko verzioniranje cjenika ispravilo
+    stari = izracunaj_racun_bijeli(533, 595, 1079, 2, 30, datum='2026-03')['iznos']
+    assert stari == pytest.approx(63.39 * 1.18, rel=0.02)
 
 
 def test_izracunaj_racun_predaja_smanjuje_iznos():
