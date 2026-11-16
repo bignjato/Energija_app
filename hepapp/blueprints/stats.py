@@ -1,9 +1,17 @@
 """/api/stats/* + /api/stats/mjesecni + /api/stats/vt-kalibracija"""
 
+import logging
+
 from flask import Blueprint, jsonify, request
 
 from ..db import get_config, get_db
-from ..tariff import HEP_TARIFA, get_tarifa, izracunaj_racun
+from ..tariff import get_tarifa, izracunaj_racun
+from ..timeutil import (
+    SQL_NOW_LOCAL, SQL_NOW_UTC, now_local, raspon_mjeseca, sql_now_local,
+    sql_today_local, today_local, utc_raspon_dana, vt_sql,
+)
+
+log = logging.getLogger(__name__)
 
 bp = Blueprint('stats', __name__, url_prefix='/api/stats')
 
@@ -26,11 +34,11 @@ def api_usporedba():
         if has_sma_dnevna:
             # UNION datuma -> red postoji ako BILO KOJA tablica ima taj datum
             # (jedan scraper moze kasniti, drugi ne).
-            rows = conn.execute("""
+            rows = conn.execute(f"""
                 WITH datumi AS (
-                    SELECT datum FROM ocitanja_dnevna WHERE datum >= date('now','-90 days')
+                    SELECT datum FROM ocitanja_dnevna WHERE datum >= {sql_today_local('-90 days')}
                     UNION
-                    SELECT datum FROM sma_dnevna       WHERE datum >= date('now','-90 days')
+                    SELECT datum FROM sma_dnevna       WHERE datum >= {sql_today_local('-90 days')}
                 )
                 SELECT d.datum,
                        h.kwh_plus              as hep_potrosnja,
@@ -46,7 +54,7 @@ def api_usporedba():
                 ORDER BY d.datum
             """).fetchall()
         else:
-            rows = conn.execute("""
+            rows = conn.execute(f"""
                 SELECT datum,
                        kwh_plus  as hep_potrosnja,
                        kwh_minus as hep_predaja,
@@ -54,13 +62,15 @@ def api_usporedba():
                        NULL as sma_mreza, NULL as sma_potrosnja,
                        NULL as autarky_rate
                 FROM ocitanja_dnevna
-                WHERE datum >= date('now', '-90 days')
+                WHERE datum >= {sql_today_local('-90 days')}
                 ORDER BY datum
             """).fetchall()
 
         result = [dict(r) for r in rows]
-        today_str = _dt.now().strftime('%Y-%m-%d')
+        today_str = today_local()
         today_row = next((r for r in result if r['datum'] == today_str), None)
+        # SMA tablice imaju UTC ts -> lokalni "danas" kao UTC raspon
+        utc_od, utc_do = utc_raspon_dana(today_str)
 
         # HEP "danas" iz satne tablice ako dnevni red nedostaje/prazan
         hep_today = conn.execute("""
@@ -68,8 +78,8 @@ def api_usporedba():
                    ROUND(COALESCE(SUM(kwh_minus), 0), 3) as km,
                    COUNT(*) as n
             FROM ocitanja_satna
-            WHERE date(ts) = ?
-        """, (today_str,)).fetchone()
+            WHERE ts >= ? AND ts <= ?
+        """, (today_str + 'T00:00:00', today_str + 'T23:59:59')).fetchone()
         has_hep_today = bool(hep_today and hep_today['n'])
         hep_kp = hep_today['kp'] if hep_today else 0
         hep_km = hep_today['km'] if hep_today else 0
@@ -84,8 +94,8 @@ def api_usporedba():
                        ROUND(SUM(total_consumption_wh)/1000.0, 3) as cons,
                        COUNT(*) as n
                 FROM sma_15min
-                WHERE date(ts) = ?
-            """, (today_str,)).fetchone()
+                WHERE ts >= ? AND ts < ?
+            """, (utc_od, utc_do)).fetchone()
             if t and t['n']:
                 cons = t['cons'] or 0
                 grid = t['grid'] or 0
@@ -106,8 +116,8 @@ def api_usporedba():
                        AVG(external_consumption_w) as avg_grid,
                        AVG(total_consumption_w)    as avg_cons,
                        AVG(autarky_rate)           as avg_aut
-                FROM sma_live WHERE date(ts) = ?
-            """, (today_str,)).fetchone()
+                FROM sma_live WHERE ts >= ? AND ts < ?
+            """, (utc_od, utc_do)).fetchone()
             if t and t['n']:
                 try:
                     t1 = _dt.fromisoformat((t['ts_min'] or '').rstrip('Z'))
@@ -353,7 +363,7 @@ def api_roi():
 @bp.route('/dug')
 def api_dug():
     """Dug prema HEP-u + sezonska projekcija isplate + cijene u oba smjera."""
-    from ..tariff import HEP_TARIFA, get_vt_udio_registri
+    from ..tariff import get_vt_udio_registri
     conn = get_db()
     try:
         racuni = [dict(r) for r in conn.execute(
@@ -415,7 +425,7 @@ def api_dug():
             rows = conn.execute(
                 "SELECT substr(datum,1,7) mj, ROUND(SUM(kwh_plus),2) kp, "
                 "ROUND(SUM(kwh_minus),2) km, COUNT(*) n "
-                "FROM ocitanja_dnevna WHERE datum >= date('now','-24 months') "
+                f"FROM ocitanja_dnevna WHERE datum >= {sql_today_local('-24 months')} "
                 "GROUP BY substr(datum,1,7)"
             ).fetchall()
             for r in rows:
@@ -429,7 +439,7 @@ def api_dug():
         sezonski = {m: round(sum(v) / len(v), 2) for m, v in po_kal.items()}
         godisnji_neto = round(sum(sezonski.values()), 2) if len(sezonski) == 12 else None
 
-        t = HEP_TARIFA
+        t = get_tarifa()
         pdv = 1 + t["pdv"]
         vt_buy = (t["vt_opskrba"] + t["vt_distrib"] + t["vt_prijenos"] + t["solidarna"] + t["oie"]) * pdv
         nt_buy = (t["nt_opskrba"] + t["nt_distrib"] + t["nt_prijenos"] + t["solidarna"] + t["oie"]) * pdv
@@ -465,40 +475,43 @@ def api_optimalno():
     try:
         has_sma = _table_exists(conn, 'sma_live')
 
-        hep_satno = conn.execute('''
+        # "red ima podatke" = potrošnja ILI predaja: sunčani sati u kojima kuća
+        # samo predaje (kwh_plus = 0) moraju ući u prosjek.
+        hep_satno = conn.execute(f'''
             SELECT CAST(strftime('%H', ts) AS INTEGER) as sat,
                    ROUND(AVG(kwh_plus), 4) as prosj_potrosnja,
                    ROUND(AVG(kwh_minus), 4) as prosj_predaja,
                    COUNT(*) as n
             FROM ocitanja_satna
-            WHERE ts <= datetime('now') AND kwh_plus > 0
+            WHERE ts <= {SQL_NOW_LOCAL} AND (kwh_plus > 0 OR kwh_minus > 0)
             GROUP BY CAST(strftime('%H', ts) AS INTEGER)
             ORDER BY sat
         ''').fetchall()
 
         sma_satno = []
         has_15min = _table_exists(conn, 'sma_15min')
+        # SMA ts je UTC -> sat dana se računa lokalno ('localtime'), kao HEP sat
         if has_15min:
             sma_satno = conn.execute('''
-                SELECT CAST(strftime('%H', ts) AS INTEGER) as sat,
+                SELECT CAST(strftime('%H', ts, 'localtime') AS INTEGER) as sat,
                        ROUND(AVG(pv_w_total) / 1000.0, 3) as prosj_pv_w,
                        ROUND(AVG(pv_w_inv1) / 1000.0, 3) as prosj_inv1_kw,
                        ROUND(AVG(pv_w_inv2) / 1000.0, 3) as prosj_inv2_kw,
                        COUNT(*) as n
                 FROM sma_15min
-                GROUP BY CAST(strftime('%H', ts) AS INTEGER)
+                GROUP BY CAST(strftime('%H', ts, 'localtime') AS INTEGER)
                 ORDER BY sat
             ''').fetchall()
         elif has_sma:
-            sma_satno = conn.execute('''
-                SELECT CAST(strftime('%H', ts) AS INTEGER) as sat,
+            sma_satno = conn.execute(f'''
+                SELECT CAST(strftime('%H', ts, 'localtime') AS INTEGER) as sat,
                        ROUND(AVG(pv_generation_w) / 1000.0, 3) as prosj_pv_w,
                        0 as prosj_inv1_kw,
                        0 as prosj_inv2_kw,
                        COUNT(*) as n
                 FROM sma_live
-                WHERE ts <= datetime('now')
-                GROUP BY CAST(strftime('%H', ts) AS INTEGER)
+                WHERE ts <= {SQL_NOW_UTC}
+                GROUP BY CAST(strftime('%H', ts, 'localtime') AS INTEGER)
                 ORDER BY sat
             ''').fetchall()
 
@@ -516,13 +529,13 @@ def api_mjesecni():
     try:
         has_sma = _table_exists(conn, 'sma_dnevna')
 
-        rows = conn.execute('''
+        rows = conn.execute(f'''
             SELECT substr(h.datum,1,7) as mjesec,
                    ROUND(SUM(h.kwh_plus),2)  as hep_potrosnja,
                    ROUND(SUM(h.kwh_minus),2) as hep_predaja,
                    COUNT(h.datum) as n_dana
             FROM ocitanja_dnevna h
-            WHERE h.datum >= date('now', '-36 months')
+            WHERE h.datum >= {sql_today_local('-36 months')}
             GROUP BY substr(h.datum,1,7)
             ORDER BY mjesec DESC
         ''').fetchall()
@@ -557,6 +570,7 @@ def api_mjesecni():
             r['procj_trosak_neto'] = round(
                 kp * (t_mj['vt_opskrba'] * vt_eff + t_mj['nt_opskrba'] * (1 - vt_eff)) -
                 km * t_mj['otkup'], 2)
+            r['otkup_cijena'] = t_mj['otkup']   # cijena otkupa koja je vrijedila taj mjesec
             if has_sma:
                 sma = sma_po_mj.get(r['mjesec'])
                 r['sma_pv']        = sma['pv'] if sma else None
@@ -569,7 +583,7 @@ def api_mjesecni():
 
         return jsonify({
             'mjeseci': result,
-            'tarifa':  HEP_TARIFA,
+            'tarifa':  dict(get_tarifa()),
             'racuni':  racuni,
         })
     finally:
@@ -586,14 +600,13 @@ def api_procjena_trenutni():
       - Primijeni HEP tarife + VT/NT slider + pretplate
       - Vrati: proteklo, projicirano za mjesec, postotak proteklog mjeseca
     """
-    from datetime import datetime
     from calendar import monthrange
     from ..tariff import (
-        HEP_TARIFA, get_vt_udio, izracunaj_racun,
+        get_vt_udio, izracunaj_racun,
         izracunaj_racun_bijeli, otkup_viskova_bijeli,
     )
 
-    now = datetime.now()
+    now = now_local()
     god, mj = now.year, now.month
     n_dana_mj = monthrange(god, mj)[1]
     proteklo_dana = now.day  # uključno do današnjeg dana
@@ -605,27 +618,24 @@ def api_procjena_trenutni():
             vt_do = int(get_config('TARIFA_VT_DO', '21'))
         except (TypeError, ValueError):
             vt_od, vt_do = 7, 21
-        vt_hi = vt_do - 1
+        # VT po UTC satu (zimi 07-21, ljeti 08-22 lokalno) — vidi timeutil.vt_sql
+        je_vt = vt_sql('ts', vt_od, vt_do)
 
         mj_str = f'{god:04d}-{mj:02d}'
+        mj_od, mj_do = raspon_mjeseca(mj_str)
         row = conn.execute(f'''
             SELECT
                 ROUND(SUM(kwh_plus), 2) as kwh_plus,
                 ROUND(SUM(kwh_minus), 2) as kwh_minus,
-                ROUND(SUM(CASE WHEN CAST(strftime('%H', ts) AS INT) BETWEEN ? AND ?
-                            THEN kwh_plus ELSE 0 END), 2) as kwh_vt,
-                ROUND(SUM(CASE WHEN CAST(strftime('%H', ts) AS INT) BETWEEN ? AND ?
-                            THEN 0 ELSE kwh_plus END), 2) as kwh_nt,
-                ROUND(SUM(CASE WHEN CAST(strftime('%H', ts) AS INT) BETWEEN ? AND ?
-                            THEN kwh_minus ELSE 0 END), 2) as kwh_vt_pred,
-                ROUND(SUM(CASE WHEN CAST(strftime('%H', ts) AS INT) BETWEEN ? AND ?
-                            THEN 0 ELSE kwh_minus END), 2) as kwh_nt_pred,
+                ROUND(SUM(CASE WHEN {je_vt} THEN kwh_plus ELSE 0 END), 2) as kwh_vt,
+                ROUND(SUM(CASE WHEN {je_vt} THEN 0 ELSE kwh_plus END), 2) as kwh_nt,
+                ROUND(SUM(CASE WHEN {je_vt} THEN kwh_minus ELSE 0 END), 2) as kwh_vt_pred,
+                ROUND(SUM(CASE WHEN {je_vt} THEN 0 ELSE kwh_minus END), 2) as kwh_nt_pred,
                 MAX(ts) as zadnji_ts,
                 MIN(ts) as prvi_ts
             FROM ocitanja_satna
-            WHERE substr(ts,1,7) = ?
-        ''', (vt_od, vt_hi, vt_od, vt_hi,
-              vt_od, vt_hi, vt_od, vt_hi, mj_str)).fetchone()
+            WHERE ts >= ? AND ts < ?
+        ''', (mj_od, mj_do)).fetchone()
 
         # zadnji uvezeni račun za pretplatu i model tarife
         last_bill = conn.execute('''
@@ -695,8 +705,9 @@ def api_procjena_trenutni():
         model_label = 'Standardni dvotarifni'
 
     # Pretplate (fiksni dio)
-    pret_opskrba = (last_bill['pretplata'] if last_bill else None) or HEP_TARIFA['opskrbna_mj']
-    pret_mjerna  = (last_bill['mjerna_mjernina'] if last_bill else None) or HEP_TARIFA['mjerna_mj']
+    t = get_tarifa()
+    pret_opskrba = (last_bill['pretplata'] if last_bill else None) or t['opskrbna_mj']
+    pret_mjerna  = (last_bill['mjerna_mjernina'] if last_bill else None) or t['mjerna_mj']
     fiksno = round(pret_opskrba + pret_mjerna, 2)
 
     return jsonify({
@@ -723,13 +734,13 @@ def api_procjena_trenutni():
         'otkup_proteklo':      otkup_proteklo,
         'otkup_procjena':      otkup_proj,
         'tarifa': {
-            'vt_kwh': round(HEP_TARIFA['vt_opskrba'] + HEP_TARIFA['vt_distrib'] + HEP_TARIFA['vt_prijenos'], 6),
-            'nt_kwh': round(HEP_TARIFA['nt_opskrba'] + HEP_TARIFA['nt_distrib'] + HEP_TARIFA['nt_prijenos'], 6),
+            'vt_kwh': round(t['vt_opskrba'] + t['vt_distrib'] + t['vt_prijenos'], 6),
+            'nt_kwh': round(t['nt_opskrba'] + t['nt_distrib'] + t['nt_prijenos'], 6),
             'pretplata':  fiksno,
-            'pdv':        HEP_TARIFA['pdv'],
-            'otkup':      HEP_TARIFA['otkup'],
-            'vt_otkup':   HEP_TARIFA['vt_otkup'],
-            'nt_otkup':   HEP_TARIFA['nt_otkup'],
+            'pdv':        t['pdv'],
+            'otkup':      t['otkup'],
+            'vt_otkup':   t['vt_otkup'],
+            'nt_otkup':   t['nt_otkup'],
         },
     })
 
@@ -740,10 +751,11 @@ def api_cijene():
 
     Izvori (po prioritetu):
       1. Zadnji uvezeni HEP račun (pretplata, mjerna_mjernina)
-      2. HEP_TARIFA konstante (VT/NT/distrib/prijenos/solidarna/oie/PDV/otkup)
+      2. Važeći cjenik — tariff.get_tarifa() (VT/NT/distrib/prijenos/solidarna/oie/PDV/otkup)
       3. VT_UDIO_PERC iz config-a
     """
-    from ..tariff import HEP_TARIFA, get_vt_udio, get_vt_udio_registri
+    from .. import tariff
+    from ..tariff import get_vt_udio, get_vt_udio_registri
     conn = get_db()
     try:
         row = conn.execute('''
@@ -756,7 +768,7 @@ def api_cijene():
     finally:
         conn.close()
 
-    t = HEP_TARIFA
+    t = get_tarifa()
     pretplata_opskrba = (row['pretplata'] if row else None) or t['opskrbna_mj']
     pretplata_mjerna  = (row['mjerna_mjernina'] if row else None) or t['mjerna_mj']
     vt_udio_izvor = 'registri (prosjek 3 mj)' if reg_prosjek is not None else 'slider'
@@ -769,8 +781,21 @@ def api_cijene():
                + t['solidarna'] + t['oie']) * (1 + t['pdv'])
     avg_full = vt_full * vt_udio + nt_full * (1 - vt_udio)
 
+    # Izvor cijena: tariff.get_tarifa_izvor() ako postoji (cjenik izveden iz
+    # uvezenih računa); inače stari opis (zadnji račun s pretplatom).
+    izvor = None
+    izvor_fn = getattr(tariff, 'get_tarifa_izvor', None)
+    if callable(izvor_fn):
+        try:
+            izvor = izvor_fn()
+        except Exception:
+            log.exception('get_tarifa_izvor nije uspio')
+    if not izvor:
+        izvor = (row['period'] + ' (' + (row['model_tarife'] or '') + ')'
+                 if row else 'default HEP_TARIFA')
+
     return jsonify({
-        'izvor':              row['period'] + ' (' + (row['model_tarife'] or '') + ')' if row else 'default HEP_TARIFA',
+        'izvor':              izvor,
         'pretplata_opskrba':  round(pretplata_opskrba, 3),
         'pretplata_mjerna':   round(pretplata_mjerna, 3),
         'pretplata_ukupno':   round(pretplata_opskrba + pretplata_mjerna, 3),
@@ -819,8 +844,9 @@ def api_weather():
         if r.status_code != 200:
             return jsonify({'error': f'open-meteo HTTP {r.status_code}'}), 502
         return jsonify(r.json())
-    except Exception as e:
-        return jsonify({'error': str(e)}), 502
+    except Exception:
+        log.exception('open-meteo dohvat nije uspio')
+        return jsonify({'error': 'Vremenska prognoza trenutno nije dostupna'}), 502
 
 
 @bp.route('/power-limit-history')
@@ -864,7 +890,9 @@ def api_power_limit_history():
                 pass
         return jsonify({'series': series, 'entity': ent})
     except Exception as e:
-        return jsonify({'series': [], 'note': str(e)})
+        # samo tip greške: poruka requests iznimke sadrži HA URL
+        log.warning('HA power-limit history nije uspio: %s', type(e).__name__)
+        return jsonify({'series': [], 'note': 'HA trenutno nije dostupan'})
 
 
 @bp.route('/plant-info')
@@ -879,20 +907,18 @@ def api_plant_info():
       - pv_today_kwh, pv_month_kwh, pv_year_kwh, pv_total_kwh
       - power_limit_w, power_limit_perc  (iz HA ako konfigurirano)
     """
-    from datetime import datetime
-    from ..tariff import HEP_TARIFA
     import os, requests
     from netutil import ha_verify
 
     nominal_kw     = float(get_config('PV_NOMINAL_KW', '0') or 0)
     commission     = get_config('PV_COMMISSION_DATE', '')
     co2_factor     = float(get_config('PV_CO2_FACTOR_G_KWH', '640') or 640)
-    feed_tariff    = float(get_config('PV_FEED_TARIFF_EUR', '') or HEP_TARIFA.get('otkup', 0.064379))
+    feed_tariff    = float(get_config('PV_FEED_TARIFF_EUR', '') or get_tarifa().get('otkup', 0.064379))
     power_limit_ent = get_config('HA_ENT_POWER_LIMIT', '')
 
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    mj_str    = datetime.now().strftime('%Y-%m')
-    god_str   = datetime.now().strftime('%Y')
+    today_str = today_local()
+    mj_od, mj_do = raspon_mjeseca(today_str[:7])
+    god = int(today_str[:4])
 
     conn = get_db()
     try:
@@ -902,13 +928,15 @@ def api_plant_info():
         pv_today = pv_today['pv_generation_kwh'] if pv_today and pv_today['pv_generation_kwh'] else 0
 
         pv_month = conn.execute(
-            "SELECT ROUND(SUM(pv_generation_kwh),2) as s FROM sma_dnevna WHERE substr(datum,1,7)=?",
-            (mj_str,)
+            "SELECT ROUND(SUM(pv_generation_kwh),2) as s FROM sma_dnevna "
+            "WHERE datum >= ? AND datum < ?",
+            (mj_od, mj_do)
         ).fetchone()['s'] or 0
 
         pv_year = conn.execute(
-            "SELECT ROUND(SUM(pv_generation_kwh),2) as s FROM sma_dnevna WHERE substr(datum,1,4)=?",
-            (god_str,)
+            "SELECT ROUND(SUM(pv_generation_kwh),2) as s FROM sma_dnevna "
+            "WHERE datum >= ? AND datum < ?",
+            (f'{god:04d}-01-01', f'{god + 1:04d}-01-01')
         ).fetchone()['s'] or 0
 
         pv_total = conn.execute(
@@ -972,28 +1000,45 @@ def api_peak_snaga():
     kW = kwh_plus(15min) * 4  (jer je period 15 min = 1/4h)
     Vraća peak za zadnji dan, tjedan, mjesec, godinu + timestamp peak-a.
     """
+    # Razdoblja su ugniježđena (dan ⊂ tjedan ⊂ mjesec ⊂ godina ⊂ uvijek), pa se
+    # svaki red svrsta u NAJUŽE razdoblje kojem pripada i po tom razredu uzme
+    # MAX; peak šireg razdoblja = max preko svih užih razreda. Tako su dovoljna
+    # 2 prolaza kroz tablicu (potrošnja, predaja) umjesto 10.
+    # ts je lokalni 'T' format -> granice iz sql_now_local(), ne datetime('now').
+    labele = ['dan', 'tjedan', 'mjesec', 'godina', 'uvijek']
+    razred = f'''CASE WHEN ts >= {sql_now_local('-1 days')}   THEN 0
+                     WHEN ts >= {sql_now_local('-7 days')}   THEN 1
+                     WHEN ts >= {sql_now_local('-30 days')}  THEN 2
+                     WHEN ts >= {sql_now_local('-365 days')} THEN 3
+                     ELSE 4 END'''
+
+    def _peak(kol, uvjet=''):
+        # SQLite: uz jedan MAX() "gola" kolona ts dolazi iz reda s maksimumom
+        rows = conn.execute(f'''
+            SELECT {razred} as razred, ts,
+                   MAX({kol}) as kwh, ROUND(MAX({kol}) * 4, 2) as kw
+            FROM ocitanja_15min
+            WHERE ts <= {SQL_NOW_LOCAL} {uvjet}
+            GROUP BY razred
+        ''').fetchall()
+        po_razredu = {r['razred']: r for r in rows}
+        res, best = [], None
+        for i in range(len(labele)):
+            r = po_razredu.get(i)
+            if r is not None and (best is None or (
+                    r['kwh'] is not None
+                    and (best['kwh'] is None or r['kwh'] > best['kwh']))):
+                best = r
+            res.append(best)
+        return res
+
     conn = get_db()
     try:
+        potr = _peak('kwh_plus')
+        pred = _peak('kwh_minus', 'AND kwh_minus > 0')
         out = {}
-        for label, period in [
-            ('dan',      "datetime('now','-1 days')"),
-            ('tjedan',   "datetime('now','-7 days')"),
-            ('mjesec',   "datetime('now','-30 days')"),
-            ('godina',   "datetime('now','-365 days')"),
-            ('uvijek',   "datetime('1970-01-01')"),
-        ]:
-            row = conn.execute(f'''
-                SELECT ts, ROUND(kwh_plus * 4, 2) as kw, ROUND(kwh_minus * 4, 2) as kw_predaja
-                FROM ocitanja_15min
-                WHERE ts >= {period} AND ts <= datetime('now')
-                ORDER BY kwh_plus DESC LIMIT 1
-            ''').fetchone()
-            row_pred = conn.execute(f'''
-                SELECT ts, ROUND(kwh_minus * 4, 2) as kw
-                FROM ocitanja_15min
-                WHERE ts >= {period} AND ts <= datetime('now') AND kwh_minus > 0
-                ORDER BY kwh_minus DESC LIMIT 1
-            ''').fetchone()
+        for i, label in enumerate(labele):
+            row, row_pred = potr[i], pred[i]
             out[label] = {
                 'peak_potrosnja_kw': row['kw'] if row else None,
                 'peak_potrosnja_ts': row['ts'] if row else None,
@@ -1009,32 +1054,29 @@ def api_peak_snaga():
 def api_vt_nt_trosak():
     """VT/NT trošak split (€) — koliko po tarifama u zadnjih 12 mj.
 
-    Koristi config VT_OD/VT_DO i tarifne cijene iz HEP_TARIFA.
+    Koristi config VT_OD/VT_DO (zimski sati; ljeti +1h) i važeći cjenik.
     """
-    from ..tariff import HEP_TARIFA
     try:
         vt_od = int(get_config('TARIFA_VT_OD', '7'))
         vt_do = int(get_config('TARIFA_VT_DO', '21'))
     except (TypeError, ValueError):
         vt_od, vt_do = 7, 21
-    vt_hi = vt_do - 1
+    je_vt = vt_sql('ts', vt_od, vt_do)
 
     conn = get_db()
     try:
         rows = conn.execute(f'''
             SELECT substr(ts,1,7) as mj,
-                   ROUND(SUM(CASE WHEN CAST(strftime('%H', ts) AS INT) BETWEEN ? AND ?
-                              THEN kwh_plus ELSE 0 END), 2) as vt_kwh,
-                   ROUND(SUM(CASE WHEN CAST(strftime('%H', ts) AS INT) BETWEEN ? AND ?
-                              THEN 0 ELSE kwh_plus END), 2) as nt_kwh,
+                   ROUND(SUM(CASE WHEN {je_vt} THEN kwh_plus ELSE 0 END), 2) as vt_kwh,
+                   ROUND(SUM(CASE WHEN {je_vt} THEN 0 ELSE kwh_plus END), 2) as nt_kwh,
                    ROUND(SUM(kwh_minus), 2) as predaja_kwh
             FROM ocitanja_satna
-            WHERE ts >= datetime('now','-12 months')
+            WHERE ts >= {sql_now_local('-12 months')}
             GROUP BY substr(ts,1,7)
             ORDER BY mj DESC
-        ''', (vt_od, vt_hi, vt_od, vt_hi)).fetchall()
+        ''').fetchall()
 
-        t = HEP_TARIFA
+        t = get_tarifa()
         out = []
         for r in rows:
             vt_kwh = r['vt_kwh'] or 0
@@ -1077,6 +1119,8 @@ def api_vt_kalibracija():
     Vraća dva izračuna:
       - simple:  VT = ure unutar [VT_OD, VT_DO), svi dani
       - workdays: VT = ure unutar [VT_OD, VT_DO), ponedjeljak-petak
+    VT_OD/VT_DO su zimski (CET) sati; za ljetnog računanja VT je sat kasnije
+    po lokalnom vremenu (08-22) — vidi timeutil.vt_sql.
 
     Query params:
       mjesec=YYYY-MM   (default = zadnja 3 mjeseca)
@@ -1089,28 +1133,30 @@ def api_vt_kalibracija():
     except (TypeError, ValueError):
         vt_od, vt_do = 7, 21
 
-    # Bounds: VT je sat ∈ [vt_od, vt_do - 1]
-    vt_hi = vt_do - 1
+    je_vt = vt_sql('ts', vt_od, vt_do)
 
     conn = get_db()
     try:
         if mjesec:
-            where = "WHERE substr(ts,1,7) = ?"
-            params = (mjesec,)
+            try:
+                where = "WHERE ts >= ? AND ts < ?"
+                params = raspon_mjeseca(mjesec)
+            except ValueError:
+                where = "WHERE substr(ts,1,7) = ?"
+                params = (mjesec,)
             group  = ""
             limit  = ""
         else:
-            where = "WHERE ts >= datetime('now','-12 months')"
+            where = f"WHERE ts >= {sql_now_local('-12 months')}"
             params = ()
             group  = "GROUP BY substr(ts,1,7)"
             limit  = "ORDER BY mj DESC LIMIT 12"
 
         sql = f'''
             SELECT substr(ts,1,7) as mj,
-                   ROUND(SUM(CASE WHEN CAST(strftime('%H', ts) AS INT) BETWEEN ? AND ?
-                              THEN kwh_plus ELSE 0 END), 2) as vt_simple,
+                   ROUND(SUM(CASE WHEN {je_vt} THEN kwh_plus ELSE 0 END), 2) as vt_simple,
                    ROUND(SUM(CASE WHEN CAST(strftime('%w', ts) AS INT) BETWEEN 1 AND 5
-                                   AND CAST(strftime('%H', ts) AS INT) BETWEEN ? AND ?
+                                   AND {je_vt}
                               THEN kwh_plus ELSE 0 END), 2) as vt_workdays,
                    ROUND(SUM(kwh_plus), 2) as ukupno
             FROM ocitanja_satna
@@ -1118,7 +1164,7 @@ def api_vt_kalibracija():
             {group}
             {limit}
         '''
-        rows = conn.execute(sql, (vt_od, vt_hi, vt_od, vt_hi) + params).fetchall()
+        rows = conn.execute(sql, params).fetchall()
 
         out = []
         for r in rows:
@@ -1140,8 +1186,8 @@ def api_vt_kalibracija():
             'vt_od': vt_od, 'vt_do': vt_do,
             'mjeseci': out,
             'objasnjenje': {
-                'simple':   f'VT = svi dani u satima {vt_od}-{vt_do}h',
-                'workdays': f'VT = pon–pet u satima {vt_od}-{vt_do}h, vikend cijeli NT',
+                'simple':   f'VT = svi dani u satima {vt_od}-{vt_do}h (ljeti {vt_od + 1}-{vt_do + 1}h)',
+                'workdays': f'VT = pon–pet u satima {vt_od}-{vt_do}h (ljeti {vt_od + 1}-{vt_do + 1}h), vikend cijeli NT',
             },
         })
     finally:

@@ -1,13 +1,20 @@
 """/api/data, /api/data/sve, /api/povijest, /api/sma/live"""
 
-from datetime import datetime, timedelta
+import re
+from datetime import timedelta
 
 from flask import Blueprint, jsonify, request
 
 from ..db import get_db, get_config
-from ..tariff import HEP_TARIFA, get_vt_udio
+from ..tariff import get_tarifa, get_vt_udio
+from ..timeutil import (
+    SQL_NOW_LOCAL, SQL_NOW_UTC, SQL_TODAY_LOCAL, now_local, sql_now_utc,
+    today_local, utc_raspon_dana,
+)
 
 bp = Blueprint('data', __name__, url_prefix='/api')
+
+_DATUM_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
 
 def _omm_filter(prefix=''):
@@ -44,11 +51,11 @@ def api_omm():
 
 
 def _efektivne_cijene() -> dict:
-    """Izračunaj prosječnu cijenu kupnje/prodaje iz HEP_TARIFA + VT udio.
+    """Izračunaj prosječnu cijenu kupnje/prodaje iz važećeg cjenika + VT udio.
 
     Koristi se u UI-u Financije za jednostavne projekcije.
     """
-    t = HEP_TARIFA
+    t = get_tarifa()
     vt_udio = get_vt_udio()
     vt_full = (t['vt_opskrba'] + t['vt_distrib'] + t['vt_prijenos']
                + t['solidarna'] + t['oie'])
@@ -77,7 +84,8 @@ def api_data():
         satna = conn.execute(f'''
             SELECT ts, SUM(kwh_plus) as kwh_plus, SUM(kwh_minus) as kwh_minus
             FROM ocitanja_satna
-            WHERE ts <= datetime('now') AND kwh_plus > 0 {omm_c}
+            WHERE ts <= {SQL_NOW_LOCAL}
+              AND (kwh_plus > 0 OR kwh_minus > 0) {omm_c}
             GROUP BY ts
             ORDER BY ts DESC LIMIT 168
         ''', omm_p).fetchall()
@@ -85,7 +93,7 @@ def api_data():
         dnevna = conn.execute(f'''
             SELECT datum, SUM(kwh_plus) as kwh_plus, SUM(kwh_minus) as kwh_minus
             FROM ocitanja_dnevna
-            WHERE datum <= date('now') {omm_c}
+            WHERE datum <= {SQL_TODAY_LOCAL} {omm_c}
             GROUP BY datum
             ORDER BY datum DESC LIMIT 90
         ''', omm_p).fetchall()
@@ -110,15 +118,17 @@ def api_data():
                        total_consumption_kwh, self_consumption_kwh, autarky_rate
                 FROM sma_dnevna ORDER BY datum DESC LIMIT 90
             ''').fetchall()]
-            sma_satna = [dict(r) for r in conn.execute('''
-                SELECT strftime('%Y-%m-%dT%H:00:00', ts) as sat,
+            # sma_live.ts je UTC ('...+00:00') -> granice u UTC 'T' formatu,
+            # a oznaka sata lokalna (kao HEP satna serija uz koju se crta).
+            sma_satna = [dict(r) for r in conn.execute(f'''
+                SELECT strftime('%Y-%m-%dT%H:00:00', ts, 'localtime') as sat,
                        ROUND(AVG(pv_generation_w), 0) as pv_w,
                        ROUND(AVG(feed_in_w), 0) as feed_w,
                        ROUND(AVG(external_consumption_w), 0) as grid_w,
                        ROUND(AVG(total_consumption_w), 0) as total_w
                 FROM sma_live
-                WHERE ts >= datetime('now', '-7 days') AND ts <= datetime('now')
-                GROUP BY strftime('%Y-%m-%dT%H:00:00', ts)
+                WHERE ts >= {sql_now_utc('-7 days')} AND ts <= {SQL_NOW_UTC}
+                GROUP BY strftime('%Y-%m-%dT%H:00:00', ts, 'localtime')
                 ORDER BY sat DESC LIMIT 168
             ''').fetchall()]
 
@@ -136,7 +146,9 @@ def api_data():
         # Danas zbirno iz sma_live (jer sma_dnevna ne piše tijekom dana)
         sma_today = None
         if has_sma:
-            today_str = datetime.now().strftime('%Y-%m-%d')
+            today_str = today_local()
+            # lokalni "danas" kao UTC raspon (ts je UTC) — ujedno koristi indeks
+            utc_od, utc_do = utc_raspon_dana(today_str)
             t = conn.execute('''
                 SELECT
                     COUNT(*) as n,
@@ -148,8 +160,8 @@ def api_data():
                     AVG(pv_generation_w) as avg_pv,
                     AVG(autarky_rate) as avg_aut
                 FROM sma_live
-                WHERE date(ts) = ?
-            ''', (today_str,)).fetchone()
+                WHERE ts >= ? AND ts < ?
+            ''', (utc_od, utc_do)).fetchone()
             if t and t['n']:
                 # protekla aktivna sati od prvog sample-a do zadnjeg
                 try:
@@ -182,7 +194,7 @@ def api_data():
             'sma_today':  sma_today,
             'tarifa':     tarifa,
             'efektivne_cijene': _efektivne_cijene(),
-            'ts':         datetime.now().isoformat(),
+            'ts':         now_local().replace(tzinfo=None).isoformat(),
         })
     finally:
         conn.close()
@@ -196,7 +208,7 @@ def api_data_sve():
         dnevna = conn.execute(f'''
             SELECT datum, SUM(kwh_plus) as kwh_plus, SUM(kwh_minus) as kwh_minus
             FROM ocitanja_dnevna
-            WHERE datum <= date('now') {omm_c}
+            WHERE datum <= {SQL_TODAY_LOCAL} {omm_c}
             GROUP BY datum
             ORDER BY datum DESC
         ''', omm_p).fetchall()
@@ -220,8 +232,8 @@ def api_data_sve():
 
 @bp.route('/povijest')
 def api_povijest():
-    od  = request.args.get('od',  (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'))
-    do  = request.args.get('do',  datetime.now().strftime('%Y-%m-%d'))
+    od  = request.args.get('od',  (now_local() - timedelta(days=30)).strftime('%Y-%m-%d'))
+    do  = request.args.get('do',  today_local())
     res = request.args.get('res', 'day')
     omm_c, omm_p = _omm_filter()
 
@@ -235,25 +247,38 @@ def api_povijest():
         ).fetchone() is not None
 
         if res == 'hour':
+            # Raspon po ts (koristi indeks) umjesto date(ts) BETWEEN; za
+            # neispravan format datuma ostaje stari predikat.
+            datumi_ok = bool(_DATUM_RE.match(od) and _DATUM_RE.match(do))
+            if datumi_ok:
+                hep_where, hep_p = 'ts >= ? AND ts <= ?', [od + 'T00:00:00', do + 'T23:59:59']
+            else:
+                hep_where, hep_p = 'date(ts) BETWEEN ? AND ?', [od, do]
             hep = conn.execute(f'''
                 SELECT ts, SUM(kwh_plus) as kwh_plus, SUM(kwh_minus) as kwh_minus
                 FROM ocitanja_satna
-                WHERE date(ts) BETWEEN ? AND ? AND ts <= datetime('now') {omm_c}
+                WHERE {hep_where} AND ts <= {SQL_NOW_LOCAL} {omm_c}
                 GROUP BY ts
                 ORDER BY ts
-            ''', [od, do] + omm_p).fetchall()
+            ''', hep_p + omm_p).fetchall()
             sma = []
             if has_15min:
-                sma = conn.execute('''
-                    SELECT strftime('%Y-%m-%dT%H:00:00', ts) as sat,
+                # sma_15min.ts je UTC ('Z'): lokalni dani -> UTC raspon, a sat
+                # se označava lokalno da se poklopi s HEP ts ključem.
+                try:
+                    sma_where, sma_p = 'ts >= ? AND ts < ?', utc_raspon_dana(od, do)
+                except ValueError:
+                    sma_where, sma_p = "date(ts, 'localtime') BETWEEN ? AND ?", (od, do)
+                sma = conn.execute(f'''
+                    SELECT strftime('%Y-%m-%dT%H:00:00', ts, 'localtime') as sat,
                            ROUND(SUM(pv_w_total)*0.25/1000.0, 3) as pv_kwh,
                            ROUND(SUM(pv_w_inv1)*0.25/1000.0, 3) as inv1_kwh,
                            ROUND(SUM(pv_w_inv2)*0.25/1000.0, 3) as inv2_kwh
                     FROM sma_15min
-                    WHERE date(ts) BETWEEN ? AND ?
-                    GROUP BY strftime('%Y-%m-%dT%H:00:00', ts)
+                    WHERE {sma_where}
+                    GROUP BY strftime('%Y-%m-%dT%H:00:00', ts, 'localtime')
                     ORDER BY sat
-                ''', (od, do)).fetchall()
+                ''', sma_p).fetchall()
             return jsonify({'res': 'hour', 'od': od, 'do': do,
                             'hep': [dict(r) for r in hep],
                             'sma': [dict(r) for r in sma]})
@@ -266,7 +291,7 @@ def api_povijest():
                        ROUND(SUM(kwh_minus), 2) as kwh_minus,
                        COUNT(DISTINCT datum) as n_dana
                 FROM ocitanja_dnevna
-                WHERE datum BETWEEN ? AND ? AND datum <= date('now') {omm_c}
+                WHERE datum BETWEEN ? AND ? AND datum <= {SQL_TODAY_LOCAL} {omm_c}
                 GROUP BY strftime('%Y-W%W', datum)
                 ORDER BY tjedan
             ''', [od, do] + omm_p).fetchall()
@@ -289,7 +314,7 @@ def api_povijest():
         hep = conn.execute(f'''
             SELECT datum, SUM(kwh_plus) as kwh_plus, SUM(kwh_minus) as kwh_minus
             FROM ocitanja_dnevna
-            WHERE datum BETWEEN ? AND ? AND datum <= date('now') {omm_c}
+            WHERE datum BETWEEN ? AND ? AND datum <= {SQL_TODAY_LOCAL} {omm_c}
             GROUP BY datum
             ORDER BY datum
         ''', [od, do] + omm_p).fetchall()

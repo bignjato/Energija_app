@@ -108,6 +108,11 @@ class HEPSession:
         self.token = None
         self.logged_in = False
         self.kupci = []
+        # Neuspjeli dohvati krivulja (HTTP greska / iznimka) — sync() ih
+        # pretvara u ERROR red u sync_log. Prazan mjesec NIJE greska.
+        self.greske = []
+        self.greske_registri = []
+        self._detect_pokusan = False
 
     def login(self, username, password):
         log.info("Prijava: %s", username)
@@ -123,7 +128,17 @@ class HEPSession:
                 log.error("Greska pri prijavi: %s", e)
                 return False
             if r.status_code == 200:
-                data = r.json()
+                try:
+                    data = r.json()
+                except ValueError:
+                    # 200 s ne-JSON tijelom (HTML odrzavanje, captive portal...).
+                    # Tijelo se ne logira — moglo bi sadrzavati token.
+                    log.error("Prijava neuspjesna: odgovor 200 nije JSON (%s, %d B)",
+                              r.headers.get("Content-Type", "?"), len(r.content or b""))
+                    return False
+                if not isinstance(data, (list, dict)):
+                    log.error("Prijava neuspjesna: neocekivan JSON tip %s", type(data).__name__)
+                    return False
                 # Novi API: response je list kupac-objekata; auth preko
                 # Set-Cookie 'accessToken'. Stari: {"Token":..,"KupacList":..}.
                 if isinstance(data, list):
@@ -165,24 +180,58 @@ class HEPSession:
         log.info("Pronadjeno %d mjernih mjesta", len(mjesta))
         return mjesta
 
+    def _post_data(self, path):
+        """POST na data endpoint (path pocinje s '/api/...').
+
+        404/405 = HEP je opet promijenio API prefiks: jednom po sesiji probaj
+        detect_base_url() i, ako vrati drugu bazu, ponovi zahtjev na njoj.
+        """
+        global BASE_URL
+        r = self.session.post(f"{BASE_URL}{path}", timeout=30)
+        if r.status_code in (404, 405) and not self._detect_pokusan:
+            self._detect_pokusan = True
+            det = detect_base_url()
+            if det and det != BASE_URL:
+                log.warning("HEP API verzija promijenjena: %s -> %s", BASE_URL, det)
+                BASE_URL = det
+                r = self.session.post(f"{BASE_URL}{path}", timeout=30)
+        return r
+
     def get_krivulje_mjesec(self, omm_sifra, mjesec_fmt, smjer="A-"):
         """
         Dohvati 15-min krivulje za jedan mjesec.
         mjesec_fmt: 'MM.YYYY' (npr. '03.2026')
         smjer: 'A-' vraca A+ potrosnju, 'A%2B' za predaju
+
+        Vraca [] i kad mjesec jos nema podataka i kad dohvat ne uspije;
+        neuspjeh (HTTP greska / iznimka) se dodatno biljezi u self.greske.
         """
-        url = f"{BASE_URL}/api/data/omm/{omm_sifra}/krivulja/mjesec/{mjesec_fmt}/smjer/{smjer}"
+        path = f"/api/data/omm/{omm_sifra}/krivulja/mjesec/{mjesec_fmt}/smjer/{smjer}"
+        opis = f"krivulja {mjesec_fmt} smjer={smjer}"
         try:
-            r = self.session.post(url, timeout=30)
+            r = self._post_data(path)
             if r.status_code == 200:
-                data = r.json()
+                data = r.json() if r.content else []
                 if isinstance(data, list) and data:
                     log.info("  %s smjer=%s: %d zapisa", mjesec_fmt, smjer, len(data))
                     return data
-            log.debug("  %s smjer=%s: %s", mjesec_fmt, smjer, r.text[:100])
+                if data:
+                    # 200, ali nije lista zapisa — nije HTTP greska, no vrijedi vidjeti
+                    log.warning("  %s smjer=%s: neocekivan odgovor: %s",
+                                mjesec_fmt, smjer, r.text[:100])
+                else:
+                    log.debug("  %s smjer=%s: nema podataka", mjesec_fmt, smjer)
+                return []
+            if r.status_code == 204:
+                log.debug("  %s smjer=%s: 204 (nema podataka)", mjesec_fmt, smjer)
+                return []
+            log.warning("  %s smjer=%s: HTTP %s %s", mjesec_fmt, smjer,
+                        r.status_code, r.text[:100])
+            self.greske.append(f"{opis}: HTTP {r.status_code}")
             return []
         except Exception as e:
-            log.error("Greska get_krivulje: %s", e)
+            log.warning("Greska get_krivulje %s smjer=%s: %s", mjesec_fmt, smjer, e)
+            self.greske.append(f"{opis}: {type(e).__name__}")
             return []
 
     def get_registri_mjesec(self, omm_sifra, mjesec_fmt):
@@ -191,17 +240,23 @@ class HEPSession:
         Format: [{"Sifra":"...","Obis":"REG: A+_T1","Datum":"2026-05-31T23:59:00","Value":"36239,9450"}]
         204 No Content = mjesec jos nije zakljucen (tekuci).
         """
-        url = f"{BASE_URL}/api/data/omm/{omm_sifra}/mjesec/{mjesec_fmt}/registri"
+        path = f"/api/data/omm/{omm_sifra}/mjesec/{mjesec_fmt}/registri"
         try:
-            r = self.session.post(url, timeout=30)
-            if r.status_code == 200 and r.content:
-                data = r.json()
+            r = self._post_data(path)
+            if r.status_code == 200:
+                data = r.json() if r.content else []
                 if isinstance(data, list) and data:
                     log.info("  %s registri: %d zapisa", mjesec_fmt, len(data))
                     return data
+                return []
+            if r.status_code == 204:
+                return []
+            log.warning("  %s registri: HTTP %s %s", mjesec_fmt, r.status_code, r.text[:100])
+            self.greske_registri.append(f"registri {mjesec_fmt}: HTTP {r.status_code}")
             return []
         except Exception as e:
-            log.error("Greska get_registri: %s", e)
+            log.warning("Greska get_registri %s: %s", mjesec_fmt, e)
+            self.greske_registri.append(f"registri {mjesec_fmt}: {type(e).__name__}")
             return []
 
 
@@ -242,19 +297,27 @@ def parse_vrijednost(v):
         return 0.0
 
 
+def _sada():
+    """Trenutno lokalno vrijeme (kontejneri rade s TZ=Europe/Zagreb)."""
+    return datetime.now()
+
+
 def spremi_krivulje(conn, podaci, mjerno_mjesto, je_minus=False):
     """
     Spremi 15-min krivulje.
     Format: {"Status":"0","Sifra":"...","Obis":"LP: A+_T0","Datum":"2026-02-28T23:45:00","Value":"1,648"}
+    Datum je KRAJ intervala: uzorak T pokriva (T-15min, T].
     """
     if not podaci:
         return 0
     saved = 0
-    # HEP vraca cijeli mjesec unaprijed s nulama — buduce dane ne spremamo
-    danas = datetime.now().strftime("%Y-%m-%d")
+    # HEP vraca cijeli mjesec unaprijed s nulama — uzorke ciji interval jos
+    # nije zavrsio ne spremamo. Usporedba po vremenu, ne po datumu: uzorak
+    # 'sutra T00:00:00' je zadnji interval danasnjeg dana.
+    sada = _sada().strftime("%Y-%m-%dT%H:%M:%S")
     for row in podaci:
         ts  = row.get("Datum") or row.get("datum") or row.get("DateTime")
-        if ts and ts[:10] > danas:
+        if ts and ts[:19] > sada:
             continue
         val = parse_vrijednost(row.get("Value") or row.get("Vrijednost") or 0)
         # HEP API vraca kWh za 15-min period, ali sumiran kao da je satni
@@ -286,52 +349,84 @@ def spremi_krivulje(conn, podaci, mjerno_mjesto, je_minus=False):
 
 
 def agregacija(conn, mjerno_mjesto):
-    conn.execute("""
-        INSERT OR REPLACE INTO ocitanja_satna
-            (mjerno_mjesto, ts, kwh_plus, kwh_minus, kvarh_plus, kvarh_minus)
-        SELECT mjerno_mjesto,
-               strftime('%Y-%m-%dT%H:00:00', ts),
-               SUM(kwh_plus), SUM(kwh_minus),
-               SUM(kvarh_plus), SUM(kvarh_minus)
-        FROM ocitanja_15min
-        WHERE mjerno_mjesto=?
-        GROUP BY mjerno_mjesto, strftime('%Y-%m-%dT%H:00:00', ts)
-    """, (mjerno_mjesto,))
-    conn.execute("""
-        INSERT OR REPLACE INTO ocitanja_dnevna
-            (mjerno_mjesto, datum, kwh_plus, kwh_minus, kvarh_plus, kvarh_minus)
-        SELECT mjerno_mjesto,
-               date(ts),
-               SUM(kwh_plus), SUM(kwh_minus),
-               SUM(kvarh_plus), SUM(kvarh_minus)
-        FROM ocitanja_15min
-        WHERE mjerno_mjesto=?
-        GROUP BY mjerno_mjesto, date(ts)
-    """, (mjerno_mjesto,))
-    # Trailing nula-dani = HEP jos nije isporucio podatke; obrisi ih da ne
-    # kvare n_dana u procjenama i grafove (dan s 0 kWh u oba smjera ne postoji)
-    conn.execute("""
-        DELETE FROM ocitanja_dnevna WHERE mjerno_mjesto=:m
-          AND kwh_plus=0 AND kwh_minus=0
-          AND datum > (SELECT COALESCE(MAX(datum),'1900-01-01') FROM ocitanja_dnevna
-                       WHERE mjerno_mjesto=:m AND (kwh_plus>0 OR kwh_minus>0))
-    """, {'m': mjerno_mjesto})
-    conn.execute("""
-        DELETE FROM ocitanja_satna WHERE mjerno_mjesto=:m
-          AND kwh_plus=0 AND kwh_minus=0
-          AND ts > (SELECT COALESCE(MAX(ts),'1900-01-01') FROM ocitanja_satna
-                    WHERE mjerno_mjesto=:m AND (kwh_plus>0 OR kwh_minus>0))
-    """, {'m': mjerno_mjesto})
-    conn.execute("""
-        DELETE FROM ocitanja_15min WHERE mjerno_mjesto=:m
-          AND kwh_plus=0 AND kwh_minus=0
-          AND ts > (SELECT COALESCE(MAX(ts),'1900-01-01') FROM ocitanja_15min
-                    WHERE mjerno_mjesto=:m AND (kwh_plus>0 OR kwh_minus>0))
-    """, {'m': mjerno_mjesto})
-    conn.commit()
+    """Ponovno izgradi ocitanja_satna i ocitanja_dnevna iz ocitanja_15min.
+
+    HEP uzorak nosi oznaku KRAJA intervala (T pokriva (T-15min, T]), pa se
+    svaki uzorak pripisuje satu/danu u kojem interval POCINJE (ts - 15 min):
+    'D+1T00:00:00' je zadnji interval dana D. Kljucevi se time pomicu u odnosu
+    na staro grupiranje po sirovom ts, pa INSERT OR REPLACE ne bi uklonio
+    zastarjele redove — zato brisanje + ponovni upis u JEDNOJ transakciji
+    (citaci ne vide polovicnu tablicu, pad = rollback).
+    """
+    m = {'m': mjerno_mjesto}
+    conn.commit()  # zakljuci eventualnu otvorenu transakciju pozivatelja
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Trailing nula-uzorci = HEP jos nije isporucio podatke (15-min uzorak
+        # s 0 kWh u oba smjera nakon zadnjeg stvarnog ne postoji). Brisu se
+        # PRIJE agregacije, pa sati/dani bez stvarnih podataka ne nastaju i
+        # ne kvare n_dana u procjenama i grafove.
+        conn.execute("""
+            DELETE FROM ocitanja_15min WHERE mjerno_mjesto=:m
+              AND kwh_plus=0 AND kwh_minus=0
+              AND ts > (SELECT COALESCE(MAX(ts),'1900-01-01') FROM ocitanja_15min
+                        WHERE mjerno_mjesto=:m AND (kwh_plus>0 OR kwh_minus>0))
+        """, m)
+        conn.execute("DELETE FROM ocitanja_satna WHERE mjerno_mjesto=:m", m)
+        conn.execute("DELETE FROM ocitanja_dnevna WHERE mjerno_mjesto=:m", m)
+        conn.execute("""
+            INSERT INTO ocitanja_satna
+                (mjerno_mjesto, ts, kwh_plus, kwh_minus, kvarh_plus, kvarh_minus)
+            SELECT mjerno_mjesto,
+                   strftime('%Y-%m-%dT%H:00:00', ts, '-15 minutes') AS sat,
+                   SUM(kwh_plus), SUM(kwh_minus),
+                   SUM(kvarh_plus), SUM(kvarh_minus)
+            FROM ocitanja_15min
+            WHERE mjerno_mjesto=:m AND datetime(ts) IS NOT NULL
+            GROUP BY mjerno_mjesto, sat
+        """, m)
+        conn.execute("""
+            INSERT INTO ocitanja_dnevna
+                (mjerno_mjesto, datum, kwh_plus, kwh_minus, kvarh_plus, kvarh_minus)
+            SELECT mjerno_mjesto,
+                   date(ts, '-15 minutes') AS dan,
+                   SUM(kwh_plus), SUM(kwh_minus),
+                   SUM(kvarh_plus), SUM(kvarh_minus)
+            FROM ocitanja_15min
+            WHERE mjerno_mjesto=:m AND datetime(ts) IS NOT NULL
+            GROUP BY mjerno_mjesto, dan
+        """, m)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     n_sat = conn.execute("SELECT COUNT(*) FROM ocitanja_satna WHERE mjerno_mjesto=?", (mjerno_mjesto,)).fetchone()[0]
     n_dan = conn.execute("SELECT COUNT(*) FROM ocitanja_dnevna WHERE mjerno_mjesto=?", (mjerno_mjesto,)).fetchone()[0]
     return n_sat, n_dan
+
+
+def agregiraj_sve(conn, preskoci=()):
+    """Ponovno izgradi satnu/dnevnu tablicu za SVA mjerna mjesta iz baze.
+
+    Neovisno o HEP portalu: agregati moraju pratiti ocitanja_15min i kad
+    prijava ne uspije ili mjerno mjesto vise nije u odgovoru prijave (inace bi
+    stari redovi, grupirani po sirovom ts, ostali do prvog uspjesnog synca).
+    Greska na jednom mjernom mjestu ne smije prekinuti ostala ni sakriti
+    izvorni razlog neuspjeha synca.
+    """
+    mjesta = [r[0] for r in conn.execute(
+        "SELECT DISTINCT mjerno_mjesto FROM ocitanja_15min ORDER BY 1")]
+    n = 0
+    for mid in mjesta:
+        if mid in preskoci:
+            continue
+        try:
+            n_sat, n_dan = agregacija(conn, mid)
+            log.info("Agregacija %s: satna %d, dnevna %d", mid, n_sat, n_dan)
+            n += 1
+        except sqlite3.Error as e:
+            log.warning("Agregacija %s neuspjela: %s", mid, e)
+    return n
 
 
 def get_mjeseci_za_dohvat(dani_unazad):
@@ -363,12 +458,17 @@ def sync(username=None, password=None, dani_unazad=7):
         conn.execute("INSERT INTO sync_log (tip,status,poruka) VALUES (?,?,?)",
                      ("login", "ERROR", "Prijava neuspjesna"))
         conn.commit()
+        agregiraj_sve(conn)  # agregati ne ovise o dostupnosti portala
         conn.close()
         return False
 
     mjesta = hep.get_mjerna_mjesta()
     if not mjesta:
         log.warning("Nema mjernih mjesta!")
+        conn.execute("INSERT INTO sync_log (tip,status,poruka) VALUES (?,?,?)",
+                     ("sync", "ERROR", "Nema mjernih mjesta u odgovoru prijave"))
+        conn.commit()
+        agregiraj_sve(conn)
         conn.close()
         return False
 
@@ -416,8 +516,26 @@ def sync(username=None, password=None, dani_unazad=7):
         n_sat, n_dan = agregacija(conn, mid)
         log.info("  Ukupno satna: %d, dnevna: %d", n_sat, n_dan)
 
+    # Mjerna mjesta koja postoje u bazi, ali ih prijava vise ne vraca
+    agregiraj_sve(conn, preskoci={m["id"] for m in mjesta})
+
+    poruka = f"Sinkronizirano {len(mjesta)} mjernih mjesta, {len(mieseci)} mjeseci"
+    if hep.greske_registri:
+        # Registri nisu kriticni za krivulje — ostaje OK, ali neka se vidi
+        poruka += f"; registri: {len(hep.greske_registri)} neuspjelih dohvata"
+    if hep.greske:
+        # Ono sto je stiglo je spremljeno i agregirano, ali sync NIJE uspio
+        poruka = (f"{len(hep.greske)} neuspjelih dohvata krivulja: "
+                  + "; ".join(hep.greske[:5]))[:500]
+        conn.execute("INSERT INTO sync_log (tip,status,zapisi,poruka) VALUES (?,?,?,?)",
+                     ("sync", "ERROR", total_saved, poruka))
+        conn.commit()
+        conn.close()
+        log.error("Sync neuspjesan: %s", poruka)
+        return False
+
     conn.execute("INSERT INTO sync_log (tip,status,zapisi,poruka) VALUES (?,?,?,?)",
-                 ("sync", "OK", total_saved, f"Sinkronizirano {len(mjesta)} mjernih mjesta, {len(mieseci)} mjeseci"))
+                 ("sync", "OK", total_saved, poruka))
     conn.commit()
     conn.close()
     log.info("Gotovo! %d novih 15-min zapisa.", total_saved)
