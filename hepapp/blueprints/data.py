@@ -5,8 +5,8 @@ from datetime import timedelta
 
 from flask import Blueprint, jsonify, request
 
-from ..db import get_db, get_config
-from ..tariff import get_tarifa, get_vt_udio
+from ..db import get_db
+from ..tariff import get_tarifa, get_vt_udio, is_bijeli
 from ..timeutil import (
     SQL_NOW_LOCAL, SQL_NOW_UTC, SQL_TODAY_LOCAL, now_local, sql_now_utc,
     today_local, utc_raspon_dana,
@@ -62,9 +62,9 @@ def _efektivne_cijene() -> dict:
     nt_full = (t['nt_opskrba'] + t['nt_distrib'] + t['nt_prijenos']
                + t['solidarna'] + t['oie'])
     kupnja_avg = (vt_full * vt_udio + nt_full * (1 - vt_udio)) * (1 + t['pdv'])
-    # Detektira HEPI bijeli prema config-u TARIFA_MODEL ili default standardni
-    model = (get_config('TARIFA_MODEL', 'standardni') or 'standardni').lower()
-    if 'bijeli' in model:
+    # Model: zadnji uvezeni račun pa config TARIFA_MODEL — isto kao /api/stats/*
+    bijeli = is_bijeli()
+    if bijeli:
         prodaja = t['vt_otkup'] * vt_udio + t['nt_otkup'] * (1 - vt_udio)
     else:
         prodaja = t['otkup']
@@ -72,7 +72,7 @@ def _efektivne_cijene() -> dict:
         'kupnja_avg':  round(kupnja_avg, 6),
         'prodaja':     round(prodaja, 6),
         'vt_udio':     round(vt_udio * 100, 1),
-        'model':       'bijeli' if 'bijeli' in model else 'standardni',
+        'model':       'bijeli' if bijeli else 'standardni',
     }
 
 

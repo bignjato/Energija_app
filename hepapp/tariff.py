@@ -368,6 +368,66 @@ def get_tariff_model() -> str:
     return (get_config('TARIFA_MODEL', 'standardni') or 'standardni').lower()
 
 
+def is_bijeli(conn=None) -> bool:
+    """Je li kupac na HEPI bijelom (net-metering) modelu — JEDINO mjesto detekcije.
+
+    Redoslijed: model_tarife s najnovijeg uvezenog računa koji ga ima (sadrži
+    'bijeli' ili 'BIJ', npr. 'HEPI bijeli — E-K-N-BIJ1') → inače config
+    TARIFA_MODEL == 'bijeli' → inače False.
+    conn: otvorena konekcija (ne zatvara se); None = otvori vlastitu.
+    Nikad ne baca iznimku (nema baze / tablice / kolone → gleda se samo config).
+    """
+    model = ''
+    try:
+        vlastita = conn is None
+        if vlastita:
+            # get_db() bi nepostojeću bazu kreirao praznu (vidi _ucitaj_cijene_racuna)
+            conn = _db.get_db() if os.path.exists(_db.DB_PATH) else None
+        if conn is not None:
+            try:
+                rows = conn.execute(
+                    "SELECT period, model_tarife FROM racuni "
+                    "WHERE model_tarife IS NOT NULL AND TRIM(model_tarife) != ''"
+                ).fetchall()
+            finally:
+                if vlastita:
+                    conn.close()
+            if rows:
+                # period može biti i stari zapis 'MM/YYYY' -> sortiraj normalizirano
+                model = max(rows, key=lambda r: _norm_period(r[0]) or '')[1] or ''
+    except Exception as e:
+        log.debug('Model tarife s računa nedostupan (%s) — gledam config', e)
+    if 'bij' in model.lower():
+        return True
+    return get_tariff_model() == 'bijeli'
+
+
+def get_model_tarife(conn=None) -> str:
+    """'bijeli' ili 'standardni' — vidi `is_bijeli`."""
+    return 'bijeli' if is_bijeli(conn) else 'standardni'
+
+
+def zadnji_racun_i_dug(conn):
+    """(zadnji uvezeni račun, zadnji račun s poznatim dugom) kao dict ili None.
+
+    JEDINO mjesto koje određuje "trenutni račun" i "trenutni dug" — koriste ga
+    /api/stats/sazetak i /api/stats/dug da svi tabovi pokažu isti dug.
+    "Zadnji" = najveći normalizirani period (ne datum_racuna: ručno uneseni
+    račun nema ni datum_racuna ni dug). Ručno uneseni račun zato NE briše dug:
+    dug i dospijeće ostaju s najnovijeg računa koji ih ima.
+    Nikad ne baca iznimku (nema tablice / kolone → (None, None)).
+    """
+    try:
+        rows = [dict(r) for r in conn.execute('SELECT * FROM racuni').fetchall()]
+    except Exception as e:
+        log.debug('Računi nedostupni (%s)', e)
+        return None, None
+    rows.sort(key=lambda r: _norm_period(r.get('period')) or '')
+    zadnji = rows[-1] if rows else None
+    s_dugom = next((r for r in reversed(rows) if r.get('dug') is not None), None)
+    return zadnji, s_dugom
+
+
 def izracunaj_racun(kwh_plus, kwh_minus, n_dana=30, vt_udio=None, datum=None):
     """Standardni dvotarifni model — približna formula s VT_UDIO slider-om.
 

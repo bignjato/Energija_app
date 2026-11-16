@@ -1,15 +1,24 @@
 """/api/stats/* + /api/stats/mjesecni + /api/stats/vt-kalibracija"""
 
 import logging
+from datetime import date, datetime, timedelta, timezone
 
 from flask import Blueprint, jsonify, request
 
 from ..db import get_config, get_db
-from ..tariff import get_tarifa, izracunaj_racun
+from ..tariff import (
+    _norm_period, get_tarifa, get_tarifa_izvor, is_bijeli, izracunaj_racun,
+    izracunaj_racun_bijeli, otkup_viskova_bijeli, zadnji_racun_i_dug,
+)
 from ..timeutil import (
-    SQL_NOW_LOCAL, SQL_NOW_UTC, now_local, raspon_mjeseca, sql_now_local,
+    SQL_NOW_LOCAL, SQL_NOW_UTC, TZ, now_local, raspon_mjeseca, sql_now_local,
     sql_today_local, today_local, utc_raspon_dana, vt_sql,
 )
+
+MODEL_NAZIV = {
+    'bijeli':     'HEPI bijeli (net-metering)',
+    'standardni': 'Standardni dvotarifni',
+}
 
 log = logging.getLogger(__name__)
 
@@ -154,6 +163,15 @@ def api_usporedba():
                     if today_row.get(k) in (None, 0):
                         today_row[k] = v
 
+        # Usporediv je samo ZAVRŠEN dan u kojem oba izvora imaju vrijednosti koje
+        # se uspoređuju (HEP potrošnja/predaja ↔ SMA mreža/predaja). Današnji dan
+        # je djelomičan (HEP kasni ~1 dan), a stariji SMA redovi imaju samo PV.
+        for r in result:
+            r['oba_izvora'] = bool(
+                r['datum'] != today_str
+                and all(r.get(k) is not None for k in (
+                    'hep_potrosnja', 'hep_predaja', 'sma_mreza', 'sma_predaja')))
+
         return jsonify(result)
     finally:
         conn.close()
@@ -231,8 +249,6 @@ def _bijeli_mjeseci(conn):
     znaju samopotrošnju (izbjegnutu kupnju iz vlastite proizvodnje), pa je ovo
     donja granica stvarne koristi.
     """
-    from datetime import date
-    from ..tariff import izracunaj_racun_bijeli, otkup_viskova_bijeli
     if not _table_exists(conn, 'hep_registri'):
         return []
     rows = conn.execute(
@@ -270,6 +286,7 @@ def _bijeli_mjeseci(conn):
         netting = round(bez_predaje - racun['iznos'], 2)
         out.append({
             'mjesec': cur[:7], 'od': prev, 'do': cur, 'n_dana': n_dana,
+            'dana_obr': dana_obr,
             'uzeto_vt': round(vt_p, 2), 'uzeto_nt': round(nt_p, 2),
             'pred_vt': round(vt_pr, 2), 'pred_nt': round(nt_pr, 2),
             'uzeto_kwh': round(vt_p + nt_p, 2),
@@ -371,6 +388,14 @@ def api_dug():
             "FROM racuni WHERE dug IS NOT NULL ORDER BY period"
         ).fetchall()]
 
+        # kronološki po normaliziranom periodu (stari zapis 'MM/YYYY' se inače krivo sortira)
+        racuni.sort(key=lambda r: _norm_period(r["period"]) or "")
+
+        # Δ dug prema prethodnom računu (negativno = dug pada)
+        for preth, r in zip([None] + racuni, racuni):
+            r["delta"] = round(r["dug"] - preth["dug"], 2) if preth else None
+
+        # trenutni dug = isti račun koji bira zadnji_racun_i_dug (i /sazetak)
         trenutni = racuni[-1] if racuni else None
         vrh = max(racuni, key=lambda r: r["dug"]) if racuni else None
 
@@ -383,18 +408,10 @@ def api_dug():
 
         reg_udjeli, reg_prosjek = get_vt_udio_registri(conn)
 
-        # Detekcija tarifnog modela iz zadnjeg racuna
-        modr = conn.execute(
-            "SELECT model_tarife FROM racuni WHERE model_tarife IS NOT NULL "
-            "ORDER BY period DESC LIMIT 1").fetchone()
-        model = (modr["model_tarife"] if modr else "") or ""
-        is_bijeli = "bijeli" in model.lower() or "BIJ" in model.upper()
-
         po_kal = {}
         sezonski_izvor = "standardni"
-        if is_bijeli:
+        if is_bijeli(conn) and _table_exists(conn, 'hep_registri'):
             # Tocan bijeli net-metering racun iz delta registara (stanja brojila)
-            from ..tariff import izracunaj_racun_bijeli
             reg = conn.execute(
                 "SELECT datum, obis, value FROM hep_registri "
                 "WHERE obis IN ('A+_T1','A+_T2','A-_T1','A-_T2') ORDER BY datum"
@@ -469,6 +486,63 @@ def api_dug():
         conn.close()
 
 
+def _autarkija_po_satu(conn, has_15min, has_sma):
+    """Autarkija po satu dana u % (0–100) iz ZAJEDNIČKOG razdoblja HEP i SMA.
+
+    Formula (prosjeci po satu dana, kWh/h):
+        potrošnja kuće = uzeto iz mreže (HEP A+) + proizvodnja (SMA) − predano (HEP A−)
+        autarkija      = 1 − uzeto iz mreže / potrošnja kuće,  ograničeno na 0..1
+    Oba niza se računaju samo za dane u kojima postoje i HEP satni i SMA podaci
+    (inače bi se miješale različite sezone). Vraća ({sat: % | None}, razdoblje | None).
+    """
+    sma_tab, pv_kol = (('sma_15min', 'pv_w_total') if has_15min else
+                       ('sma_live', 'pv_generation_w') if has_sma else (None, None))
+    if not sma_tab:
+        return {}, None
+    hep = conn.execute(f'''
+        SELECT MIN(ts) as od, MAX(ts) as do FROM ocitanja_satna
+        WHERE ts <= {SQL_NOW_LOCAL} AND (kwh_plus > 0 OR kwh_minus > 0)
+    ''').fetchone()
+    sma = conn.execute(
+        f'SELECT MIN(ts) as od, MAX(ts) as do FROM {sma_tab} WHERE ts <= {SQL_NOW_UTC}'
+    ).fetchone()
+    sma_od, sma_do = _utc_u_lokalno(sma['od']), _utc_u_lokalno(sma['do'])
+    if not (hep['od'] and hep['do'] and sma_od and sma_do):
+        return {}, None
+    od = max(hep['od'][:10], sma_od.strftime('%Y-%m-%d'))
+    do = min(hep['do'][:10], sma_do.strftime('%Y-%m-%d'))
+    if od > do:
+        return {}, None
+
+    uzeto = {r['sat']: r for r in conn.execute(f'''
+        SELECT CAST(strftime('%H', ts) AS INTEGER) as sat,
+               AVG(kwh_plus) as uzeto, AVG(kwh_minus) as predano
+        FROM ocitanja_satna
+        WHERE ts >= ? AND ts <= ? AND ts <= {SQL_NOW_LOCAL}
+          AND (kwh_plus > 0 OR kwh_minus > 0)
+        GROUP BY CAST(strftime('%H', ts) AS INTEGER)
+    ''', (od + 'T00:00:00', do + 'T23:59:59')).fetchall()}
+    # prosječna snaga u satu (kW) = kWh u tom satu; SMA ts je UTC -> lokalni sat
+    pv = {r['sat']: r['pv'] or 0 for r in conn.execute(f'''
+        SELECT CAST(strftime('%H', ts, 'localtime') AS INTEGER) as sat,
+               AVG({pv_kol}) / 1000.0 as pv
+        FROM {sma_tab}
+        WHERE ts >= ? AND ts < ?
+        GROUP BY CAST(strftime('%H', ts, 'localtime') AS INTEGER)
+    ''', utc_raspon_dana(od, do)).fetchall()}
+
+    out = {}
+    for sat, r in uzeto.items():
+        if sat not in pv:
+            out[sat] = None
+            continue
+        u = r['uzeto'] or 0
+        kuca = u + pv[sat] - (r['predano'] or 0)
+        out[sat] = (round(100 * min(1.0, max(0.0, 1 - u / kuca)), 1)
+                    if kuca > 0.001 else None)
+    return out, {'od': od, 'do': do}
+
+
 @bp.route('/optimalno')
 def api_optimalno():
     conn = get_db()
@@ -515,20 +589,53 @@ def api_optimalno():
                 ORDER BY sat
             ''').fetchall()
 
+        hep_out = [dict(r) for r in hep_satno]
+        try:
+            aut, razdoblje = _autarkija_po_satu(conn, has_15min, has_sma)
+        except Exception:
+            log.exception('optimalno: autarkija po satu nije uspjela')
+            aut, razdoblje = {}, None
+        for r in hep_out:
+            r['autarkija'] = aut.get(r['sat'])
+
         return jsonify({
-            'hep_satno': [dict(r) for r in hep_satno],
+            'hep_satno': hep_out,
             'sma_satno': [dict(r) for r in sma_satno],
+            'autarkija_razdoblje': razdoblje,
         })
     finally:
         conn.close()
 
 
-@bp.route('/mjesecni')
-def api_mjesecni():
-    conn = get_db()
+def _vt_sati():
+    """(vt_od, vt_do) — zimski VT sati iz configa (vidi timeutil.vt_sql)."""
     try:
-        has_sma = _table_exists(conn, 'sma_dnevna')
+        return int(get_config('TARIFA_VT_OD', '7')), int(get_config('TARIFA_VT_DO', '21'))
+    except (TypeError, ValueError):
+        return 7, 21
 
+
+def _mjeseci_s_procjenom(conn, procjena=None):
+    """Mjesečni pregled (zadnjih 36 mj, najnoviji prvi) s procjenom računa po
+    STVARNOM modelu kupca. Vraća (mjeseci, racuni, bijeli).
+
+    Dijele ga /mjesecni i /sazetak da oba prikazuju iste brojke. Uz stara polja
+    (procj_racun = standardna formula, ne mijenjati) svaki mjesec dobiva:
+      procj_iznos  — procjena računa u €, POZITIVNO = za platiti
+      procj_izvor  — 'registri'   bijeli iz delta registara brojila (točno ±0,15 €)
+                     'projekcija' tekući mjesec, ista logika kao /procjena-trenutni
+                     'satna'      bijeli iz satnih očitanja (mjesec bez registara)
+                     'standardni' standardna formula (zadnji izlaz)
+      otkup_eur    — otkup viškova (bijeli; inače 0)
+      stvarni_iznos / razlika — uvezeni račun i (procj_iznos − stvarni_iznos)
+    """
+    from ..tariff import get_vt_udio_registri
+    bijeli = is_bijeli(conn)
+    model = 'bijeli' if bijeli else 'standardni'
+    tekuci = today_local()[:7]
+
+    rows = []
+    if _table_exists(conn, 'ocitanja_dnevna'):
         rows = conn.execute(f'''
             SELECT substr(h.datum,1,7) as mjesec,
                    ROUND(SUM(h.kwh_plus),2)  as hep_potrosnja,
@@ -540,90 +647,178 @@ def api_mjesecni():
             ORDER BY mjesec DESC
         ''').fetchall()
 
-        from ..tariff import get_vt_udio_registri
-        reg_udjeli, reg_prosjek = get_vt_udio_registri(conn)
+    reg_udjeli, reg_prosjek = get_vt_udio_registri(conn)
 
-        # SMA agregati za sve mjesece odjednom (umjesto upita po mjesecu)
-        sma_po_mj = {}
-        if has_sma:
-            for s in conn.execute('''
-                SELECT substr(datum,1,7) as mjesec,
-                       ROUND(SUM(pv_generation_kwh),2) as pv,
-                       ROUND(AVG(autarky_rate)*100,1) as autarkija
-                FROM sma_dnevna
-                GROUP BY substr(datum,1,7)
-            ''').fetchall():
-                sma_po_mj[s['mjesec']] = s
+    # SMA agregati za sve mjesece odjednom (umjesto upita po mjesecu)
+    has_sma = _table_exists(conn, 'sma_dnevna')
+    sma_po_mj = {}
+    if has_sma:
+        for s in conn.execute('''
+            SELECT substr(datum,1,7) as mjesec,
+                   ROUND(SUM(pv_generation_kwh),2) as pv,
+                   ROUND(AVG(autarky_rate)*100,1) as autarkija
+            FROM sma_dnevna
+            GROUP BY substr(datum,1,7)
+        ''').fetchall():
+            sma_po_mj[s['mjesec']] = s
 
-        result = []
-        for row in rows:
-            r = dict(row)
-            kp = r['hep_potrosnja'] or 0
-            km = r['hep_predaja'] or 0
-            n  = r['n_dana'] or 1
-            # sluzbeni VT udio za taj mjesec iz registara; fallback slider/prosjek
-            vt_u = reg_udjeli.get(r['mjesec']) or reg_prosjek
-            r['vt_udio_registri'] = round(vt_u * 100, 1) if vt_u is not None else None
-            r['procj_racun'] = izracunaj_racun(kp, km, n, vt_udio=vt_u, datum=r['mjesec'])
-            vt_eff = vt_u if vt_u is not None else 0.45
-            t_mj = get_tarifa(r['mjesec'])
-            r['procj_trosak_neto'] = round(
-                kp * (t_mj['vt_opskrba'] * vt_eff + t_mj['nt_opskrba'] * (1 - vt_eff)) -
-                km * t_mj['otkup'], 2)
-            r['otkup_cijena'] = t_mj['otkup']   # cijena otkupa koja je vrijedila taj mjesec
-            if has_sma:
-                sma = sma_po_mj.get(r['mjesec'])
-                r['sma_pv']        = sma['pv'] if sma else None
-                r['sma_autarkija'] = sma['autarkija'] if sma else None
-            result.append(r)
-
+    racuni = []
+    if _table_exists(conn, 'racuni'):
         racuni = [dict(r) for r in conn.execute(
             'SELECT * FROM racuni ORDER BY period DESC'
         ).fetchall()]
+    racun_po_mj = {}
+    for rc in racuni:
+        racun_po_mj.setdefault(_norm_period(rc.get('period')), rc)
 
+    # Bijeli: službene delte registara; samo puni obračunski mjeseci (28–31 dan)
+    reg_po_mj = {}
+    if bijeli:
+        reg_po_mj = {m['mjesec']: m for m in _bijeli_mjeseci(conn)
+                     if 28 <= m['n_dana'] <= 31}
+    satna_po_mj = None   # lijeno: treba samo bijelim mjesecima bez registara
+
+    def _satna(mj):
+        nonlocal satna_po_mj
+        if satna_po_mj is None:
+            satna_po_mj = {}
+            if _table_exists(conn, 'ocitanja_satna'):
+                je_vt = vt_sql('ts', *_vt_sati())
+                for s in conn.execute(f'''
+                    SELECT substr(ts,1,7) as mj,
+                           SUM(CASE WHEN {je_vt} THEN kwh_plus  ELSE 0 END) as vt,
+                           SUM(CASE WHEN {je_vt} THEN 0 ELSE kwh_plus  END) as nt,
+                           SUM(CASE WHEN {je_vt} THEN kwh_minus ELSE 0 END) as vt_pred,
+                           SUM(CASE WHEN {je_vt} THEN 0 ELSE kwh_minus END) as nt_pred,
+                           COUNT(DISTINCT substr(ts,1,10)) as n
+                    FROM ocitanja_satna
+                    WHERE ts >= {sql_today_local('-36 months')}
+                    GROUP BY substr(ts,1,7)
+                ''').fetchall():
+                    satna_po_mj[s['mj']] = s
+        return satna_po_mj.get(mj)
+
+    result = []
+    for row in rows:
+        r = dict(row)
+        mj = r['mjesec']
+        kp = r['hep_potrosnja'] or 0
+        km = r['hep_predaja'] or 0
+        n  = r['n_dana'] or 1
+        # sluzbeni VT udio za taj mjesec iz registara; fallback slider/prosjek
+        vt_u = reg_udjeli.get(mj) or reg_prosjek
+        r['vt_udio_registri'] = round(vt_u * 100, 1) if vt_u is not None else None
+        r['procj_racun'] = izracunaj_racun(kp, km, n, vt_udio=vt_u, datum=mj)
+        vt_eff = vt_u if vt_u is not None else 0.45
+        t_mj = get_tarifa(mj)
+        r['procj_trosak_neto'] = round(
+            kp * (t_mj['vt_opskrba'] * vt_eff + t_mj['nt_opskrba'] * (1 - vt_eff)) -
+            km * t_mj['otkup'], 2)
+        r['otkup_cijena'] = t_mj['otkup']   # cijena otkupa koja je vrijedila taj mjesec
+        if has_sma:
+            sma = sma_po_mj.get(mj)
+            r['sma_pv']        = sma['pv'] if sma else None
+            r['sma_autarkija'] = sma['autarkija'] if sma else None
+
+        # --- procjena po stvarnom modelu (pozitivno = za platiti) ---
+        reg = reg_po_mj.get(mj)
+        sat = None
+        if reg:
+            iznos, otkup, izvor = reg['racun_eur'], reg['otkup_eur'], 'registri'
+        elif mj == tekuci and procjena and procjena['ima_podataka']:
+            iznos = procjena['racun_procjena']
+            otkup = (procjena['otkup_procjena'] or {}).get('ukupno_eur', 0)
+            izvor = 'projekcija'
+        elif bijeli and (sat := _satna(mj)):
+            # fiksne naknade idu po mjesecu (kao u _bijeli_mjeseci)
+            dana = 30 if sat['n'] >= 28 else sat['n']
+            a = (sat['vt'] or 0, sat['nt'] or 0, sat['vt_pred'] or 0, sat['nt_pred'] or 0)
+            iznos = izracunaj_racun_bijeli(*a, dana, datum=mj)['iznos']
+            otkup = otkup_viskova_bijeli(*a, datum=mj)['ukupno_eur']
+            izvor = 'satna'
+        else:
+            iznos, otkup, izvor = r['procj_racun'], 0, 'standardni'
+        rc = racun_po_mj.get(mj)
+        stvarni = rc['iznos'] if rc else None
+        r['model'] = model
+        r['procj_iznos'] = round(iznos, 2)
+        r['procj_izvor'] = izvor
+        r['otkup_eur'] = round(otkup or 0, 2)
+        r['stvarni_iznos'] = stvarni
+        r['razlika'] = round(iznos - stvarni, 2) if stvarni is not None else None
+        result.append(r)
+
+    return result, racuni, bijeli
+
+
+def _zbroj_mjeseci(mjeseci):
+    """Računi/otkup/neto preko zadanih mjeseci — stvarni račun ako je uvezen,
+    inače procjena. Vraća (sažetak, [(mjesec, iznos)])."""
+    iznosi = [(m['mjesec'], m['stvarni_iznos'] if m['stvarni_iznos'] is not None
+               else m['procj_iznos']) for m in mjeseci]
+    rac = round(sum(i for _, i in iznosi), 2)
+    otk = round(sum(m['otkup_eur'] for m in mjeseci), 2)
+    return {
+        'racuni_eur': rac, 'otkup_eur': otk, 'neto_eur': round(rac - otk, 2),
+        'n_mjeseci': len(mjeseci),
+    }, iznosi
+
+
+def _zadnjih_12(mjeseci):
+    """Zadnjih 12 ZAVRŠENIH mjeseci (tekući se ne broji) + najskuplji među njima."""
+    tekuci = today_local()[:7]
+    zatvoreni = [m for m in mjeseci if m['mjesec'] < tekuci][:12]
+    saz, iznosi = _zbroj_mjeseci(zatvoreni)
+    naj = max(iznosi, key=lambda x: x[1]) if iznosi else None
+    saz['najskuplji'] = {'mjesec': naj[0], 'iznos': round(naj[1], 2)} if naj else None
+    return saz
+
+
+@bp.route('/mjesecni')
+def api_mjesecni():
+    conn = get_db()
+    try:
+        result, racuni, bijeli = _mjeseci_s_procjenom(conn, _procjena_trenutni(conn))
         return jsonify({
             'mjeseci': result,
             'tarifa':  dict(get_tarifa()),
             'racuni':  racuni,
+            'model':   'bijeli' if bijeli else 'standardni',
+            'sazetak_12mj': _zadnjih_12(result),
         })
     finally:
         conn.close()
 
 
-@bp.route('/procjena-trenutni')
-def api_procjena_trenutni():
-    """Procjena računa za TEKUĆI mjesec na temelju dosadašnje potrošnje.
+def _procjena_trenutni(conn):
+    """Procjena računa za TEKUĆI mjesec na temelju dosadašnje potrošnje (dict).
 
     Logika:
       - Sumiraj potrošnju/predaju od 1. do danas iz ocitanja_satna
       - Računaj prorate na cijeli mjesec (× n_dana_mjesec / proteklo_dana)
       - Primijeni HEP tarife + VT/NT slider + pretplate
       - Vrati: proteklo, projicirano za mjesec, postotak proteklog mjeseca
+
+    Jedini izvor brojki tekućeg mjeseca: /procjena-trenutni, /mjesecni
+    (procj_izvor='projekcija') i /sazetak zovu ovu funkciju. Ne baca iznimku
+    na praznoj bazi (nema tablice/redova → nule, ima_podataka=False).
     """
     from calendar import monthrange
-    from ..tariff import (
-        get_vt_udio, izracunaj_racun,
-        izracunaj_racun_bijeli, otkup_viskova_bijeli,
-    )
+    from ..tariff import get_vt_udio, get_vt_udio_registri
 
     now = now_local()
     god, mj = now.year, now.month
     n_dana_mj = monthrange(god, mj)[1]
     proteklo_dana = now.day  # uključno do današnjeg dana
 
-    conn = get_db()
-    try:
-        try:
-            vt_od = int(get_config('TARIFA_VT_OD', '7'))
-            vt_do = int(get_config('TARIFA_VT_DO', '21'))
-        except (TypeError, ValueError):
-            vt_od, vt_do = 7, 21
-        # VT po UTC satu (zimi 07-21, ljeti 08-22 lokalno) — vidi timeutil.vt_sql
-        je_vt = vt_sql('ts', vt_od, vt_do)
+    # VT po UTC satu (zimi 07-21, ljeti 08-22 lokalno) — vidi timeutil.vt_sql
+    je_vt = vt_sql('ts', *_vt_sati())
 
-        mj_str = f'{god:04d}-{mj:02d}'
-        mj_od, mj_do = raspon_mjeseca(mj_str)
-        row = conn.execute(f'''
+    mj_str = f'{god:04d}-{mj:02d}'
+    mj_od, mj_do = raspon_mjeseca(mj_str)
+    row = {}
+    if _table_exists(conn, 'ocitanja_satna'):
+        row = dict(conn.execute(f'''
             SELECT
                 ROUND(SUM(kwh_plus), 2) as kwh_plus,
                 ROUND(SUM(kwh_minus), 2) as kwh_minus,
@@ -635,37 +830,38 @@ def api_procjena_trenutni():
                 MIN(ts) as prvi_ts
             FROM ocitanja_satna
             WHERE ts >= ? AND ts < ?
-        ''', (mj_od, mj_do)).fetchone()
+        ''', (mj_od, mj_do)).fetchone())
 
-        # zadnji uvezeni račun za pretplatu i model tarife
+    # zadnji uvezeni račun za pretplatu
+    last_bill = None
+    if _table_exists(conn, 'racuni'):
         last_bill = conn.execute('''
-            SELECT pretplata, mjerna_mjernina, model_tarife FROM racuni
+            SELECT pretplata, mjerna_mjernina FROM racuni
             WHERE pretplata IS NOT NULL OR model_tarife IS NOT NULL
             ORDER BY datum_racuna DESC LIMIT 1
         ''').fetchone()
 
-        # Stvarni VT udio za sad (registri fallback ide istom konekcijom)
-        if (row['kwh_plus'] or 0) > 0:
-            vt_udio_real = (row['kwh_vt'] or 0) / row['kwh_plus']
-        else:
-            # nema satnih podataka ovaj mjesec — probaj sluzbeni prosjek iz registara
-            from ..tariff import get_vt_udio_registri
-            _, reg_prosjek = get_vt_udio_registri(conn)
-            vt_udio_real = reg_prosjek if reg_prosjek is not None else get_vt_udio()
-    finally:
-        conn.close()
+    # Stvarni VT udio za sad (registri fallback ide istom konekcijom)
+    if (row.get('kwh_plus') or 0) > 0:
+        vt_udio_real = (row.get('kwh_vt') or 0) / row['kwh_plus']
+    else:
+        # nema satnih podataka ovaj mjesec — probaj sluzbeni prosjek iz registara
+        _, reg_prosjek = get_vt_udio_registri(conn)
+        vt_udio_real = reg_prosjek if reg_prosjek is not None else get_vt_udio()
 
-    kp = row['kwh_plus'] or 0
-    km = row['kwh_minus'] or 0
-    kvt = row['kwh_vt'] or 0
-    knt = row['kwh_nt'] or 0
-    kvt_pred = row['kwh_vt_pred'] or 0
-    knt_pred = row['kwh_nt_pred'] or 0
+    bijeli = is_bijeli(conn)
+
+    kp = row.get('kwh_plus') or 0
+    km = row.get('kwh_minus') or 0
+    kvt = row.get('kwh_vt') or 0
+    knt = row.get('kwh_nt') or 0
+    kvt_pred = row.get('kwh_vt_pred') or 0
+    knt_pred = row.get('kwh_nt_pred') or 0
     # broj dana s podacima (dani s ts u tekućem mjesecu)
+    prvi, zadnji = row.get('prvi_ts'), row.get('zadnji_ts')
+    ima_podataka = bool(prvi and zadnji)
     try:
-        prvi = row['prvi_ts']
-        zadnji = row['zadnji_ts']
-        if prvi and zadnji:
+        if ima_podataka:
             dan1 = int(prvi[8:10])
             danN = int(zadnji[8:10])
             dani_s_podacima = max(1, danN - dan1 + 1)
@@ -679,16 +875,12 @@ def api_procjena_trenutni():
     proj_kp = round(kp * faktor, 2)
     proj_km = round(km * faktor, 2)
 
-    # Detekcija tarifnog modela
-    model_str = (last_bill['model_tarife'] if last_bill else '') or ''
-    is_bijeli = 'bijeli' in model_str.lower() or 'BIJ' in model_str.upper()
-
     proj_kvt = round(kvt * faktor, 2)
     proj_knt = round(knt * faktor, 2)
     proj_kvt_pred = round(kvt_pred * faktor, 2)
     proj_knt_pred = round(knt_pred * faktor, 2)
 
-    if is_bijeli:
+    if bijeli:
         # HEPI bijeli — net metering
         det_proteklo = izracunaj_racun_bijeli(kvt, knt, kvt_pred, knt_pred, dani_s_podacima)
         det_proj     = izracunaj_racun_bijeli(proj_kvt, proj_knt, proj_kvt_pred, proj_knt_pred, n_dana_mj)
@@ -696,13 +888,12 @@ def api_procjena_trenutni():
         otkup_proj     = otkup_viskova_bijeli(proj_kvt, proj_knt, proj_kvt_pred, proj_knt_pred)
         proteklo_racun = det_proteklo['iznos']
         proj_racun     = det_proj['iznos']
-        model_label    = 'HEPI bijeli (net-metering)'
     else:
         proteklo_racun = izracunaj_racun(kp, km, dani_s_podacima, vt_udio=vt_udio_real)
         proj_racun     = izracunaj_racun(proj_kp, proj_km, n_dana_mj, vt_udio=vt_udio_real)
         det_proteklo = det_proj = None
         otkup_proteklo = otkup_proj = None
-        model_label = 'Standardni dvotarifni'
+    model_kod = 'bijeli' if bijeli else 'standardni'
 
     # Pretplate (fiksni dio)
     t = get_tarifa()
@@ -710,9 +901,11 @@ def api_procjena_trenutni():
     pret_mjerna  = (last_bill['mjerna_mjernina'] if last_bill else None) or t['mjerna_mj']
     fiksno = round(pret_opskrba + pret_mjerna, 2)
 
-    return jsonify({
+    return {
         'mjesec':              mj_str,
-        'model':               model_label,
+        'model':               MODEL_NAZIV[model_kod],
+        'model_kod':           model_kod,
+        'ima_podataka':        ima_podataka,
         'n_dana_mjesec':       n_dana_mj,
         'dani_s_podacima':     dani_s_podacima,
         'proteklo_dana':       proteklo_dana,
@@ -742,7 +935,239 @@ def api_procjena_trenutni():
             'vt_otkup':   t['vt_otkup'],
             'nt_otkup':   t['nt_otkup'],
         },
-    })
+    }
+
+
+@bp.route('/procjena-trenutni')
+def api_procjena_trenutni():
+    """Procjena računa za tekući mjesec — vidi `_procjena_trenutni`."""
+    conn = get_db()
+    try:
+        return jsonify(_procjena_trenutni(conn))
+    finally:
+        conn.close()
+
+
+def _bez_solara(conn, mjeseci, bijeli):
+    """Koliko bi završeni mjeseci (lista iz _mjeseci_s_procjenom) koštali BEZ
+    elektrane — procjena.
+
+    Po mjesecu: samopotrošnja = SMA proizvodnja − predano u mrežu (≥ 0); račun
+    se ponovno izračuna s potrošnjom = uzeto iz mreže + samopotrošnja (sva u VT:
+    sunce radi u VT satima) i predajom 0. Preskaču se mjeseci bez PV podataka.
+    Vraća None ako nijedan mjesec nije izračunljiv.
+    """
+    reg_po_mj = {}
+    if bijeli:
+        reg_po_mj = {m['mjesec']: m for m in _bijeli_mjeseci(conn)
+                     if 28 <= m['n_dana'] <= 31}
+    bez = stvarno = 0.0
+    n = 0
+    for m in mjeseci:
+        pv = m.get('sma_pv')
+        if not pv:
+            continue
+        reg = reg_po_mj.get(m['mjesec'])
+        if reg:
+            vlastito = max(0.0, pv - reg['pred_kwh'])
+            iznos = izracunaj_racun_bijeli(
+                reg['uzeto_vt'] + vlastito, reg['uzeto_nt'], 0, 0,
+                reg['dana_obr'], datum=reg['do'])['iznos']
+        else:
+            kp = m['hep_potrosnja'] or 0
+            vlastito = max(0.0, pv - (m['hep_predaja'] or 0))
+            vt_u = (m['vt_udio_registri'] or 45.0) / 100.0
+            if bijeli:
+                iznos = izracunaj_racun_bijeli(
+                    kp * vt_u + vlastito, kp * (1 - vt_u), 0, 0,
+                    30 if m['n_dana'] >= 28 else m['n_dana'], datum=m['mjesec'])['iznos']
+            else:
+                uk = kp + vlastito
+                iznos = izracunaj_racun(
+                    uk, 0, m['n_dana'],
+                    vt_udio=(kp * vt_u + vlastito) / uk if uk > 0 else vt_u,
+                    datum=m['mjesec'])
+        placeno = m['stvarni_iznos'] if m['stvarni_iznos'] is not None else m['procj_iznos']
+        bez += iznos
+        stvarno += placeno - m['otkup_eur']
+        n += 1
+    if not n:
+        return None
+    return {
+        'godina_eur': round(bez, 2),
+        'usteda_eur': round(bez - stvarno, 2),
+        'neto_eur':   round(stvarno, 2),
+        'n_mjeseci':  n,
+        'napomena': (
+            f'Procjena za {n} završenih mj. ove godine: račun ponovno izračunat kao da je '
+            'vlastito potrošena sunčeva energija (SMA proizvodnja − predano u mrežu) '
+            'kupljena od HEP-a po višoj tarifi, bez predaje u mrežu. Ušteda = taj iznos '
+            '− (stvarni računi − otkup). Tekući mjesec nije uključen.'),
+    }
+
+
+@bp.route('/sazetak')
+def api_sazetak():
+    """Sažetak za naslovnicu i Financije — model, zadnji račun/dug, tekući
+    mjesec, godina do danas, zadnjih 12 mj i procjena "bez solara".
+
+    Iznosi: račun/trošak POZITIVAN (za platiti), otkup pozitivan (prihod),
+    neto = računi − otkup. Brojke tekućeg mjeseca su iz `_procjena_trenutni`,
+    mjesečne iz `_mjeseci_s_procjenom` (isto što vraća /mjesecni).
+    """
+    conn = get_db()
+    try:
+        p = _procjena_trenutni(conn)
+        mjeseci, racuni, bijeli = _mjeseci_s_procjenom(conn, p)
+        model = 'bijeli' if bijeli else 'standardni'
+        danas = today_local()
+        tekuci, god = danas[:7], danas[:4]
+
+        # Zadnji uvezeni račun + dug. Dug i dospijeće idu s najnovijeg računa
+        # koji IMA dug (isti koji /dug vraća kao 'trenutni'): ručno uneseni
+        # račun nema ni dug ni dospijeće pa ne smije sakriti poznati dug.
+        # 'dug_period' kaže s kojeg je računa dug (None = dug nepoznat).
+        racun = None
+        rc, rd = zadnji_racun_i_dug(conn)
+        if rc:
+            izv = rd or rc
+            dosp = izv.get('datum_dospijeca')
+            try:
+                do_dosp = (date.fromisoformat(dosp[:10]) - date.fromisoformat(danas)).days
+            except (TypeError, ValueError):
+                do_dosp = None
+            racun = {
+                'period': _norm_period(rc.get('period')) or rc.get('period'),
+                'iznos': rc.get('iznos'),
+                'dug': izv.get('dug'),
+                'dug_period': (_norm_period(rd.get('period')) or rd.get('period')) if rd else None,
+                'datum_dospijeca': dosp or None,
+                'dana_do_dospijeca': do_dosp,
+            }
+
+        otkup_proc = (p['otkup_procjena'] or {}).get('ukupno_eur', 0) or 0
+        mjesec = {
+            'mjesec':             p['mjesec'],
+            'ima_podataka':       p['ima_podataka'],
+            'dani_s_podacima':    p['dani_s_podacima'],
+            'n_dana_mjesec':      p['n_dana_mjesec'],
+            'do_sada_eur':        p['racun_proteklo'],
+            'procjena_eur':       p['racun_procjena'],
+            'otkup_procjena_eur': otkup_proc,
+            'neto_procjena_eur':  round(p['racun_procjena'] - otkup_proc, 2),
+            'vt_udio':            p['vt_udio_stvarni'],
+        }
+
+        # Godina do danas: završeni mjeseci + (ako ima podataka) projekcija tekućeg
+        zatvoreni = [m for m in mjeseci if m['mjesec'][:4] == god and m['mjesec'] < tekuci]
+        godina, _ = _zbroj_mjeseci(zatvoreni)
+        if p['ima_podataka']:
+            godina['racuni_eur'] = round(godina['racuni_eur'] + p['racun_procjena'], 2)
+            godina['otkup_eur']  = round(godina['otkup_eur'] + otkup_proc, 2)
+            godina['neto_eur']   = round(godina['racuni_eur'] - godina['otkup_eur'], 2)
+            godina['n_mjeseci'] += 1
+        godina = {'godina': int(god), **godina,
+                  'ukljucuje_procjenu_tekuceg': p['ima_podataka']}
+
+        z12 = _zadnjih_12(mjeseci)
+        z12.pop('najskuplji', None)
+
+        return jsonify({
+            'model':        model,
+            'model_naziv':  MODEL_NAZIV[model],
+            'cijene_izvor': get_tarifa_izvor(),
+            'racun':        racun,
+            'mjesec':       mjesec,
+            'godina':       godina,
+            'zadnjih_12':   z12,
+            'bez_solara':   _bez_solara(conn, zatvoreni, bijeli),
+        })
+    finally:
+        conn.close()
+
+
+def _utc_u_lokalno(ts):
+    """UTC zapis iz baze ('...+00:00', '...Z' ili 'YYYY-MM-DD HH:MM:SS') →
+    aware lokalni datetime; None ako se ne da pročitati."""
+    try:
+        d = datetime.fromisoformat(str(ts).strip().replace('Z', '+00:00'))
+    except (TypeError, ValueError):
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d.astimezone(TZ)
+
+
+@bp.route('/status')
+def api_status():
+    """Svježina podataka za zaglavlje (HEP kasni ~1 dan, SMA je uživo).
+
+    Samo jeftini upiti (zadnji red po indeksu); svaki dio je zaseban pa greška
+    jednog izvora ne ruši ostale. Vremena u odgovoru su LOKALNA, 'T' format.
+    """
+    fmt = '%Y-%m-%dT%H:%M:%S'
+    sada = now_local()
+    hep  = {'zadnji_uzorak': None, 'zadnji_dan': None, 'kasni_h': None, 'ok': False}
+    sma  = {'zadnji': None, 'kasni_min': None, 'ok': False}
+    sync = {'zadnji_ok': None, 'greske_24h': 0}
+    model = 'standardni'
+    conn = get_db()
+    try:
+        try:
+            # zadnji STVARNI 15-min uzorak (scraper zna upisati i prazne redove);
+            # ORDER BY ts DESC ide po indeksu i staje na prvom pogotku
+            tablica = next((t for t in ('ocitanja_15min', 'ocitanja_satna')
+                            if _table_exists(conn, t)), None)
+            r = conn.execute(f'''
+                SELECT ts FROM {tablica}
+                WHERE ts <= {SQL_NOW_LOCAL} AND (kwh_plus > 0 OR kwh_minus > 0)
+                ORDER BY ts DESC LIMIT 1
+            ''').fetchone() if tablica else None
+            if r and r['ts']:
+                uzorak = datetime.fromisoformat(r['ts'])
+                kasni = (sada.replace(tzinfo=None) - uzorak).total_seconds() / 3600.0
+                hep = {'zadnji_uzorak': r['ts'], 'kasni_h': round(max(kasni, 0), 1),
+                       'ok': kasni < 48}
+                if tablica == 'ocitanja_15min':
+                    # uzorak nosi oznaku KRAJA intervala: 00:00 = podaci do kraja jučerašnjeg dana
+                    hep['zadnji_dan'] = (uzorak - timedelta(minutes=15)).strftime('%Y-%m-%d')
+                else:
+                    hep['zadnji_dan'] = r['ts'][:10]
+        except Exception:
+            log.exception('status: HEP dio nije uspio')
+        try:
+            if _table_exists(conn, 'sma_live'):
+                # po id-u (monotono), ne po ts — pisači koriste različite TZ formate
+                r = conn.execute('SELECT ts FROM sma_live ORDER BY id DESC LIMIT 1').fetchone()
+                lok = _utc_u_lokalno(r['ts']) if r else None
+                if lok:
+                    kasni = int(max((sada - lok).total_seconds(), 0) // 60)
+                    sma = {'zadnji': lok.strftime(fmt), 'kasni_min': kasni, 'ok': kasni < 15}
+        except Exception:
+            log.exception('status: SMA dio nije uspio')
+        try:
+            if _table_exists(conn, 'sync_log'):
+                # sync_log.ts je UTC s razmakom -> granica istim formatom (datetime('now'))
+                r = conn.execute(
+                    "SELECT ts FROM sync_log WHERE status='OK' ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                lok = _utc_u_lokalno(r['ts']) if r else None
+                sync['zadnji_ok'] = lok.strftime(fmt) if lok else None
+                sync['greske_24h'] = conn.execute(
+                    "SELECT COUNT(*) FROM sync_log WHERE status='ERROR' "
+                    "AND ts > datetime('now','-1 day')").fetchone()[0]
+        except Exception:
+            log.exception('status: sync dio nije uspio')
+        if is_bijeli(conn):
+            model = 'bijeli'
+    finally:
+        conn.close()
+    try:
+        izvor = get_tarifa_izvor()
+    except Exception:
+        izvor = None
+    return jsonify({'hep': hep, 'sma': sma, 'sync': sync,
+                    'cijene_izvor': izvor, 'model': model})
 
 
 @bp.route('/cijene')
@@ -853,7 +1278,6 @@ def api_weather():
 def api_power_limit_history():
     """24h history inverter power limit-a iz HA."""
     import os, requests
-    from datetime import datetime, timedelta
     from netutil import ha_verify
 
     ent = get_config('HA_ENT_POWER_LIMIT', '')

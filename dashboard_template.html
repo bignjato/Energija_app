@@ -18,7 +18,9 @@
       <p style="font-size:10px;color:var(--muted);margin-top:2px">{{BRAND_OWNER_LINE}}</p>
     </div>
   </div>
-  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+  <!-- Svježina podataka (HEP / SMA / cijene) — puni loadStatus() iz /api/stats/status -->
+  <div class="status-pills" id="hdr-status"></div>
+  <div class="hdr-ctl" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
     <button id="themeToggle" onclick="toggleTheme()" title="Promijeni temu" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:8px;cursor:pointer;font-size:16px;line-height:1">🌙</button>
     <select id="ommSelect" onchange="changeOmm()" title="Mjerno mjesto" style="display:none;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:6px;font-family:var(--mono);font-size:12px;cursor:pointer;max-width:220px"></select>
     <select id="syncInterval" onchange="changeSyncInterval()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:6px;font-family:var(--mono);font-size:12px;cursor:pointer">
@@ -34,15 +36,15 @@
 </div>
 
 <div class="nav">
-  <div class="tab active"  onclick="goTo('pregled',this)">Pregled</div>
-  <div class="tab" onclick="goTo('usporedba',this)">HEP vs SMA</div>
-  <div class="tab" onclick="goTo('financije',this)">Financije</div>
-  <div class="tab" onclick="goTo('racuni',this)">Računi</div>
-  <div class="tab" onclick="goTo('dug',this)">Dug</div>
-  <div class="tab" onclick="goTo('isplativost',this)">Isplativost</div>
-  <div class="tab" onclick="goTo('optimalno',this)">Optimalno</div>
-  <div class="tab" onclick="goTo('povijest',this)">Povijest</div>
-  <div class="tab" onclick="goTo('postavke',this)">⚙️ Postavke</div>
+  <div class="tab active"  data-tab="pregled" onclick="goTo('pregled',this)">Pregled</div>
+  <div class="tab" data-tab="usporedba" onclick="goTo('usporedba',this)">HEP vs SMA</div>
+  <div class="tab" data-tab="financije" onclick="goTo('financije',this)">Financije</div>
+  <div class="tab" data-tab="racuni" onclick="goTo('racuni',this)">Računi</div>
+  <div class="tab" data-tab="dug" onclick="goTo('dug',this)">Dug</div>
+  <div class="tab" data-tab="isplativost" onclick="goTo('isplativost',this)">Isplativost</div>
+  <div class="tab" data-tab="optimalno" onclick="goTo('optimalno',this)">Optimalno</div>
+  <div class="tab" data-tab="povijest" onclick="goTo('povijest',this)">Povijest</div>
+  <div class="tab" data-tab="postavke" onclick="goTo('postavke',this)">⚙️ Postavke</div>
 </div>
 
 <!-- ============ PREGLED ============ -->
@@ -52,8 +54,8 @@
     <strong>Info:</strong> SMA live podaci još nisu dostupni — pokrenite <code>python3 sma_scraper.py</code> na serveru jednom da popuni bazu.
   </div>
 
-  <div class="g2">
-    <div class="card">
+  <div class="g-top">
+    <div class="card" id="card-danas">
       <div class="card-title">📅 Danas — SMA <span style="font-size:11px;color:var(--muted);font-weight:400">(live, real-time)</span></div>
       <div class="flow4">
         <div class="fl"><div class="fl-lbl">Solar proizvodnja</div><div class="fl-val c-solar" id="d-sma-p">—</div><div class="fl-unit">kWh</div></div>
@@ -71,17 +73,22 @@
         <div class="fl"><div class="fl-lbl">Datum</div><div class="fl-val" style="font-size:18px" id="d-hep-datum">—</div><div class="fl-unit">HEP kasni 24h</div></div>
       </div>
     </div>
+    <!-- Račun i dug — /api/stats/sazetak (renderRacunDug) -->
+    <div class="card" id="card-racun-dug">
+      <div class="card-title">🧾 Račun i dug</div>
+      <div id="rd-body"></div>
+    </div>
   </div>
 
   <!-- ====== Energy flow vizualizacija + Weather ====== -->
   <div class="g2" style="margin-bottom:14px">
-    <div class="card">
+    <div class="card" id="card-flow">
       <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
         <span>⚡ Energy flow — live</span>
         <span id="ef-status" style="font-size:11px;color:var(--muted);font-weight:400;font-family:var(--mono)">⏳</span>
       </div>
       <div id="energy-flow" style="position:relative;min-height:200px;display:flex;align-items:center;justify-content:space-around;font-family:var(--mono);font-size:13px">
-        <!-- Populated by JS -->
+        <div class="st-linija" style="text-align:center">Učitavam…</div>
       </div>
       <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:8px">
         <span id="ef-autarkija">Autarkija: —</span>
@@ -89,13 +96,13 @@
         <span id="ef-refresh">—</span>
       </div>
     </div>
-    <div class="card">
+    <div class="card" id="card-vrijeme">
       <div class="card-title">🌤️ Vrijeme — <span id="weather-loc">lokacija</span></div>
       <div style="display:flex;align-items:center;gap:16px;padding:8px 0">
         <div style="font-size:48px;line-height:1" id="weather-icon">⏳</div>
         <div style="flex:1">
           <div style="font-size:30px;color:var(--text);font-family:var(--mono);line-height:1" id="weather-temp">—</div>
-          <div style="font-size:12px;color:var(--muted);margin-top:4px" id="weather-desc">Učitavam…</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:4px" id="weather-desc">—</div>
         </div>
       </div>
       <div id="weather-7day" style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-top:10px;font-size:11px"></div>
@@ -103,7 +110,7 @@
   </div>
 
   <!-- ====== Cijene (iz HEP računa) ====== -->
-  <div class="card" style="margin-bottom:14px">
+  <div class="card" id="card-cijene" style="margin-bottom:14px">
     <div class="card-title">💶 Aktivne cijene (HEP)</div>
     <div style="font-size:11px;color:var(--muted);margin-bottom:10px" id="cijene-src">—</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;font-size:13px">
@@ -142,7 +149,8 @@
   </div>
 
   <!-- ====== Power limit history (24h) ====== -->
-  <div class="card" style="margin-bottom:14px">
+  <!-- bez podataka se sažme u jedan prigušeni red (stanje 'prazno' u loadPowerLimit) -->
+  <div class="card" id="card-powlimit" style="margin-bottom:14px">
     <div class="card-title">⚙️ Ograničenje snage — zadnjih 24h</div>
     <div class="cw h200"><canvas id="cPowLimit"></canvas></div>
     <div style="font-size:11px;color:var(--muted);margin-top:6px" id="pl-info"></div>
@@ -150,7 +158,7 @@
 
   <!-- ====== FNE info (Sunny Portal parity) ====== -->
   <div class="g2" style="margin-bottom:14px">
-    <div class="card">
+    <div class="card" id="card-postrojenje">
       <div class="card-title">🏭 Informacije o postrojenju</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;font-size:13px">
         <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Nominalna snaga</div><div id="pi-nom" style="font-size:18px;font-family:var(--mono);color:#22d3ee">—</div></div>
@@ -160,7 +168,7 @@
         <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Self-consumption</div><div id="pi-cons" style="font-size:18px;font-family:var(--mono);color:#fbbf24">—</div></div>
       </div>
     </div>
-    <div class="card">
+    <div class="card" id="card-eko">
       <div class="card-title">🌱 Eko & financije</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;font-size:13px">
         <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">CO₂ izbjegnut · danas</div><div id="pi-co2t" style="font-size:18px;font-family:var(--mono);color:#22c55e">—</div></div>
@@ -172,41 +180,56 @@
     </div>
   </div>
 
-  <!-- Energija po periodu -->
-  <div class="g-auto" style="margin-bottom:14px">
-    <div class="kpi solar"><div class="kpi-lbl">PV · danas</div><div class="kpi-val" id="pi-pv-d">—</div><div class="kpi-sub">kWh</div></div>
-    <div class="kpi solar"><div class="kpi-lbl">PV · ovaj mjesec</div><div class="kpi-val" id="pi-pv-m">—</div><div class="kpi-sub">kWh</div></div>
-    <div class="kpi solar"><div class="kpi-lbl">PV · ova godina</div><div class="kpi-val" id="pi-pv-y">—</div><div class="kpi-sub">kWh</div></div>
-    <div class="kpi solar"><div class="kpi-lbl">PV · ukupno</div><div class="kpi-val" id="pi-pv-t">—</div><div class="kpi-sub">kWh (od pogona)</div></div>
+  <!-- KPI po razdoblju: jedna naslovljena grupa = jedan red. PV danas je samo u kartici "Danas". -->
+  <div id="pg-kpi">
+    <div class="kpi-grupa">
+      <div class="grupa-naslov">Danas <small>SMA, do ovog trenutka</small></div>
+      <div class="kpi-strip">
+        <div class="kpi solar"><div class="kpi-lbl">Solar potrošen u kući</div><div class="kpi-val" id="k-d-self">—</div><div class="kpi-sub" id="k-d-self-sub">kWh</div></div>
+        <div class="kpi grn"><div class="kpi-lbl">Autarkija</div><div class="kpi-val" id="k-d-aut">—</div><div class="kpi-sub">potrošnje pokriveno solarom</div></div>
+        <div class="kpi"><div class="kpi-lbl">Neto razmjena s mrežom</div><div class="kpi-val" id="k-d-neto">—</div><div class="kpi-sub" id="k-d-neto-sub">kWh</div></div>
+      </div>
+    </div>
+    <div class="kpi-grupa">
+      <div class="grupa-naslov">Ovaj tjedan (od ponedjeljka) <small>ispod: zadnjih 7 dana</small></div>
+      <div class="kpi-strip">
+        <div class="kpi cons"><div class="kpi-lbl">Potrošnja iz mreže</div><div class="kpi-val" id="k-tj-h">—</div><div class="kpi-sub">kWh · 7 dana: <span id="k-7d-h">—</span></div></div>
+        <div class="kpi solar"><div class="kpi-lbl">Solar</div><div class="kpi-val" id="k-tj-s">—</div><div class="kpi-sub">kWh · 7 dana: <span id="k-7d-s">—</span></div></div>
+        <div class="kpi feed"><div class="kpi-lbl">Predaja u mrežu</div><div class="kpi-val" id="k-tj-p">—</div><div class="kpi-sub">kWh · 7 dana: <span id="k-7d-p">—</span></div></div>
+        <div class="kpi grn"><div class="kpi-lbl">Autarkija</div><div class="kpi-val" id="k-tj-a">—</div><div class="kpi-sub">prosjek · 7 dana: <span id="k-7d-a">—</span></div></div>
+      </div>
+    </div>
+    <div class="kpi-grupa">
+      <div class="grupa-naslov">Ovaj mjesec</div>
+      <div class="kpi-strip">
+        <div class="kpi cons"><div class="kpi-lbl">Potrošnja iz mreže</div><div class="kpi-val" id="k-mj-h">—</div><div class="kpi-sub">kWh</div></div>
+        <div class="kpi solar"><div class="kpi-lbl">Solar</div><div class="kpi-val" id="k-mj-s">—</div><div class="kpi-sub">kWh</div></div>
+        <div class="kpi feed"><div class="kpi-lbl">Predaja u mrežu</div><div class="kpi-val" id="k-mj-p">—</div><div class="kpi-sub">kWh</div></div>
+        <div class="kpi grn"><div class="kpi-lbl">Autarkija</div><div class="kpi-val" id="k-mj-a">—</div><div class="kpi-sub">prosjek dana</div></div>
+      </div>
+    </div>
+    <div class="kpi-grupa" id="kpi-g-ukupno">
+      <div class="grupa-naslov">Ukupno</div>
+      <div class="kpi-strip">
+        <div class="kpi solar"><div class="kpi-lbl">PV · ova godina</div><div class="kpi-val" id="pi-pv-y">—</div><div class="kpi-sub">kWh</div></div>
+        <div class="kpi solar"><div class="kpi-lbl">PV · ukupno</div><div class="kpi-val" id="pi-pv-t">—</div><div class="kpi-sub">kWh (od pogona)</div></div>
+        <div class="kpi acc"><div class="kpi-lbl">Prosj. dan · solar</div><div class="kpi-val" id="k-pr-s">—</div><div class="kpi-sub">kWh / dan · zadnjih 90 dana</div></div>
+      </div>
+    </div>
   </div>
 
-  <div class="g-auto">
-    <div class="kpi cons"><div class="kpi-lbl">Ovaj tjedan (od pon) · potrošnja</div><div class="kpi-val" id="k-tj-h">—</div><div class="kpi-sub" id="k-tj-h-sub">kWh iz mreže</div></div>
-    <div class="kpi solar"><div class="kpi-lbl">Ovaj tjedan (od pon) · solar</div><div class="kpi-val" id="k-tj-s">—</div><div class="kpi-sub">kWh</div></div>
-    <div class="kpi feed"><div class="kpi-lbl">Ovaj tjedan (od pon) · predaja</div><div class="kpi-val" id="k-tj-p">—</div><div class="kpi-sub">kWh</div></div>
-    <div class="kpi grn"><div class="kpi-lbl">Ovaj tjedan (od pon) · autarkija</div><div class="kpi-val" id="k-tj-a">—</div><div class="kpi-sub">%</div></div>
-    <div class="kpi cons"><div class="kpi-lbl">Zadnjih 7 dana · potrošnja</div><div class="kpi-val" id="k-7d-h">—</div><div class="kpi-sub">kWh iz mreže</div></div>
-    <div class="kpi solar"><div class="kpi-lbl">Zadnjih 7 dana · solar</div><div class="kpi-val" id="k-7d-s">—</div><div class="kpi-sub">kWh</div></div>
-    <div class="kpi feed"><div class="kpi-lbl">Zadnjih 7 dana · predaja</div><div class="kpi-val" id="k-7d-p">—</div><div class="kpi-sub">kWh</div></div>
-    <div class="kpi grn"><div class="kpi-lbl">Zadnjih 7 dana · autarkija</div><div class="kpi-val" id="k-7d-a">—</div><div class="kpi-sub">%</div></div>
-    <div class="kpi cons"><div class="kpi-lbl">Mjesec · potrošnja</div><div class="kpi-val" id="k-mj-h">—</div><div class="kpi-sub">kWh iz mreže</div></div>
-    <div class="kpi solar"><div class="kpi-lbl">Mjesec · solar</div><div class="kpi-val" id="k-mj-s">—</div><div class="kpi-sub">kWh</div></div>
-    <div class="kpi feed"><div class="kpi-lbl">Mjesec · predaja</div><div class="kpi-val" id="k-mj-p">—</div><div class="kpi-sub">kWh</div></div>
-    <div class="kpi acc"><div class="kpi-lbl">Prosj. dan · solar</div><div class="kpi-val" id="k-pr-s">—</div><div class="kpi-sub">kWh / dan</div></div>
-  </div>
-
-  <div class="g2">
-    <div class="cc" style="margin-bottom:0">
+  <div class="g2" id="pg-grafovi">
+    <div class="cc full" style="margin-bottom:0">
       <h3>Satna energija — 7 dana</h3>
-      <div class="sub">HEP potrošnja + SMA solar</div>
+      <div class="sub">HEP potrošnja + SMA solar · oznaka dana stoji na ponoći</div>
       <div class="cw h250"><canvas id="cSatni"></canvas></div>
     </div>
 
     <!-- Peak snaga KPI -->
-    <div class="cc" style="margin-bottom:14px">
+    <div class="cc" id="card-peak" style="margin-bottom:0">
       <h3>⚡ Vršna snaga (iz 15-min HEP očitanja)</h3>
       <div class="sub">kW = kWh × 4 iz 15-minutnih očitanja</div>
-      <div class="kpi-strip" id="peak-kpi" style="margin-top:10px">
+      <div class="kpi-strip" id="peak-kpi" style="margin-top:10px;margin-bottom:0">
         <div class="kpi cons"><div class="kpi-lbl">Peak ovaj tjedan</div><div class="kpi-val" id="pk-week">—</div><div class="kpi-sub" id="pk-week-ts">—</div></div>
         <div class="kpi cons"><div class="kpi-lbl">Peak ovaj mjesec</div><div class="kpi-val" id="pk-month">—</div><div class="kpi-sub" id="pk-month-ts">—</div></div>
         <div class="kpi cons"><div class="kpi-lbl">Peak ova godina</div><div class="kpi-val" id="pk-year">—</div><div class="kpi-sub" id="pk-year-ts">—</div></div>
@@ -221,7 +244,7 @@
   </div>
 
   <!-- Kumulativni kWh — tekući mjesec -->
-  <div class="cc" style="margin-top:14px;margin-bottom:0">
+  <div class="cc" id="card-kumulativ" style="margin-top:14px;margin-bottom:0">
     <h3>📈 Kumulativ — tekući mjesec</h3>
     <div class="sub">Zbroj od 1. u mjesecu do danas: potrošnja iz mreže / predaja / solar</div>
     <div class="cw h250"><canvas id="cKumulativ"></canvas></div>
@@ -243,20 +266,22 @@
     <span style="margin-left:14px;font-size:12px;color:var(--muted)" id="u-period-info"></span>
   </div>
 
-  <div class="g-auto">
+  <div class="g-auto" id="u-kpi" style="margin-bottom:8px">
     <div class="kpi solar"><div class="kpi-lbl">HEP predaja ↔ SMA predaja</div><div class="kpi-val" id="u-pred-d">—</div><div class="kpi-sub" id="u-pred-lbl">razlika kWh</div></div>
     <div class="kpi cons"><div class="kpi-lbl">HEP potrošnja ↔ SMA mreža</div><div class="kpi-val" id="u-pot-d">—</div><div class="kpi-sub" id="u-pot-lbl">razlika kWh</div></div>
     <div class="kpi grn"><div class="kpi-lbl">Ukupna solar</div><div class="kpi-val" id="u-sol-t">—</div><div class="kpi-sub" id="u-sol-lbl">kWh po SMA</div></div>
-    <div class="kpi acc"><div class="kpi-lbl">Prosj. autarkija</div><div class="kpi-val" id="u-aut">—</div><div class="kpi-sub">%</div></div>
+    <div class="kpi acc"><div class="kpi-lbl">Prosj. autarkija</div><div class="kpi-val" id="u-aut">—</div><div class="kpi-sub">po SMA</div></div>
   </div>
+  <!-- koliko je dana stvarno uspoređeno (dani bez oba izvora ne ulaze u razlike) -->
+  <div class="sitno" id="u-usp-info" style="margin:0 2px 16px"></div>
 
-  <div class="cc">
+  <div class="cc" id="card-u-graf">
     <h3 id="u-chart-title">Usporedba HEP vs SMA — ovaj mjesec</h3>
     <div class="sub">HEP mjerač vs SMA Home Manager · dnevni podaci</div>
     <div class="cw h300"><canvas id="cUsporedba"></canvas></div>
   </div>
 
-  <div class="card">
+  <div class="card" id="card-u-tablica">
     <div class="card-title" id="u-table-title">Tablica usporedbe — ovaj mjesec</div>
     <div class="tbl-wrap">
       <table>
@@ -275,135 +300,53 @@
 <!-- ============ FINANCIJE ============ -->
 <div id="page-financije" class="page"><div class="wrap">
 
-  <!-- Cijene info (read-only — uređuje se u Postavkama) -->
-  <div class="form-section" style="margin-bottom:14px">
-    <h3>⚡ Aktivne tarife</h3>
-    <div style="font-size:13px;color:var(--muted);margin-bottom:10px">
-      Cijene i tarifni model dolaze iz HEP-a + tvojih postavki. Za promjene idi u
-      <a href="#" onclick="event.preventDefault();goTo('postavke',document.querySelectorAll('.tab')[8])" style="color:var(--accent)">Postavke → Tarifa</a>.
-    </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px" id="cijene-info">
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Prosj. kupnja</div>
-        <div style="font-size:18px;color:#f87171;font-family:var(--mono)" id="ci-kup">— c/kWh</div>
-      </div>
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Prodaja (otkup)</div>
-        <div style="font-size:18px;color:#22c55e;font-family:var(--mono)" id="ci-pro">— c/kWh</div>
-      </div>
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">VT udio</div>
-        <div style="font-size:18px;color:#22d3ee;font-family:var(--mono)" id="ci-vt">—</div>
-      </div>
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Model</div>
-        <div style="font-size:18px;color:var(--text);font-family:var(--mono)" id="ci-model">—</div>
-      </div>
-    </div>
+  <!-- Model obračuna + izvor cijena (puna razrada cijena po kWh je na Pregledu) -->
+  <div class="fin-head" id="fin-head">
+    <span>Model obračuna: <strong id="fin-model">—</strong></span>
+    <span id="fin-izvor"></span>
+    <button class="btn-link" type="button" onclick="otvoriCijene()">Cijene po kWh — detalji na Pregledu →</button>
   </div>
 
   <!-- Stanje HEP računa -->
-  <div class="card" style="margin-bottom:14px">
+  <div class="card" id="card-hep-stanje" style="margin-bottom:14px">
     <div class="card-title">📋 Stanje HEP računa</div>
-    <div id="hep-stanje" style="font-size:13px;color:var(--muted)">Učitavam…</div>
+    <div id="hep-stanje" style="font-size:13px;color:var(--muted)"></div>
   </div>
 
   <!-- Procjena tekućeg mjeseca -->
-  <div class="card" style="margin-bottom:14px">
+  <div class="card" id="card-procjena" style="margin-bottom:14px">
     <div class="card-title">🔮 Procjena tekućeg mjeseca</div>
-    <div id="hep-procjena" style="font-size:13px;color:var(--muted)">Računam iz HEP satnih očitanja…</div>
+    <div id="hep-procjena" style="font-size:13px;color:var(--muted)"></div>
+  </div>
+
+  <!-- Godina do danas (iz /api/stats/sazetak: godina, zadnjih_12, bez_solara) -->
+  <div class="card" id="card-godina" style="margin-bottom:14px">
+    <div class="card-title">📅 Godina do danas</div>
+    <div id="fin-godina"></div>
   </div>
 
   <!-- VT/NT trošak split (iz HEP satnih očitanja) -->
-  <div class="card" style="margin-bottom:14px">
+  <div class="card" id="card-vtnt" style="margin-bottom:14px">
     <div class="card-title">⚡ VT / NT trošak split — zadnjih 12 mj.</div>
-    <div class="sub" style="margin-bottom:10px;color:var(--muted);font-size:12px" id="vtnt-info">Računam iz HEP satnih očitanja...</div>
+    <div class="sub" style="margin-bottom:10px;color:var(--muted);font-size:12px" id="vtnt-info"></div>
     <div class="cw h280"><canvas id="cVtNt"></canvas></div>
     <div class="tbl-wrap" style="margin-top:10px">
       <table>
         <thead><tr>
           <th>Mjesec</th>
           <th>VT kWh</th><th>NT kWh</th><th>VT %</th>
-          <th>VT €</th><th>NT €</th><th>Predaja €</th><th>Neto trošak €</th>
+          <th>VT</th><th>NT</th><th>Vrijednost predaje</th>
         </tr></thead>
         <tbody id="tVtNt"></tbody>
       </table>
     </div>
+    <div class="sitno" style="margin-top:8px">Okvirna raspodjela: satni kWh × jedinična cijena, bez mjesečnog netiranja i fiksnih naknada. Iznos računa i otkup po mjesecima su u grafu „Mjesečni računi i otkup” i u tabu Računi.</div>
   </div>
 
-  <div class="g-fin">
-    <div class="fin"><div class="lbl">Trošak · ovaj mj.</div><div class="val neg" id="fn-t-mj">—</div><div class="sub" id="fn-t-mj-k"></div></div>
-    <div class="fin"><div class="lbl">Prihod · ovaj mj.</div><div class="val pos" id="fn-p-mj">—</div><div class="sub" id="fn-p-mj-k"></div></div>
-    <div class="fin"><div class="lbl">Neto ušteda · mj.</div><div class="val pos" id="fn-u-mj">—</div><div class="sub">prihod − trošak</div></div>
-    <div class="fin"><div class="lbl">Bez solara platili bi</div><div class="val neu" id="fn-bez">—</div><div class="sub">ukupna potroš. × cijena</div></div>
-    <div class="fin"><div class="lbl">Trošak · ovaj god.</div><div class="val neg" id="fn-t-god">—</div><div class="sub"></div></div>
-    <div class="fin"><div class="lbl">Prihod · ovaj god.</div><div class="val pos" id="fn-p-god">—</div><div class="sub"></div></div>
-    <div class="fin"><div class="lbl">Neto ušteda · god.</div><div class="val pos" id="fn-u-god">—</div><div class="sub"></div></div>
-    <div class="fin"><div class="lbl">Prosj. dnevni trošak</div><div class="val neu" id="fn-prosj">—</div><div class="sub">zadnjih 30 dana</div></div>
-  </div>
-
-  <!-- PROJEKCIJA -->
-  <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px 22px;margin-bottom:14px;">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
-      <div>
-        <h3 style="font-size:14px;font-weight:600;color:#fff;">📈 Projekcija do kraja mjeseca</h3>
-        <div style="font-size:12px;color:var(--muted);margin-top:2px;">Na temelju prosjeka dosadašnjih dana u mjesecu</div>
-      </div>
-      <div style="font-size:11px;color:var(--muted);font-family:var(--mono)" id="fn-proj-info"></div>
-    </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;">
-      <div style="background:var(--bg);border:1px solid var(--border);border-left:3px solid var(--grid-out);border-radius:8px;padding:14px;">
-        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;">Procj. trošak</div>
-        <div style="font-family:var(--mono);font-size:20px;font-weight:600;color:var(--grid-out)" id="fn-proj-trosak">—</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:3px;" id="fn-proj-trosak-kwh"></div>
-      </div>
-      <div style="background:var(--bg);border:1px solid var(--border);border-left:3px solid var(--green);border-radius:8px;padding:14px;">
-        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;">Procj. prihod</div>
-        <div style="font-family:var(--mono);font-size:20px;font-weight:600;color:var(--green)" id="fn-proj-prihod">—</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:3px;" id="fn-proj-prihod-kwh"></div>
-      </div>
-      <div style="background:var(--bg);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:8px;padding:14px;">
-        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;">Procj. neto</div>
-        <div style="font-family:var(--mono);font-size:20px;font-weight:600;color:var(--accent)" id="fn-proj-neto">—</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:3px;">prihod − trošak</div>
-      </div>
-      <div style="background:var(--bg);border:1px solid var(--border);border-left:3px solid var(--solar);border-radius:8px;padding:14px;">
-        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;">Procj. solar</div>
-        <div style="font-family:var(--mono);font-size:20px;font-weight:600;color:var(--solar)" id="fn-proj-solar">—</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:3px;">kWh do kraja mj.</div>
-      </div>
-      <div style="background:var(--bg);border:1px solid var(--border);border-left:3px solid var(--consume);border-radius:8px;padding:14px;">
-        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;">Procj. potrošnja</div>
-        <div style="font-family:var(--mono);font-size:20px;font-weight:600;color:var(--consume)" id="fn-proj-potrosnja">—</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:3px;">kWh do kraja mj.</div>
-      </div>
-      <div style="background:var(--bg);border:1px solid var(--border);border-left:3px solid var(--feed);border-radius:8px;padding:14px;">
-        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;">Prošlogodišnji mj.</div>
-        <div style="font-family:var(--mono);font-size:20px;font-weight:600;color:var(--feed)" id="fn-proj-lani">—</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:3px;" id="fn-proj-lani-sub">neto prošle god.</div>
-      </div>
-    </div>
-
-    <!-- Progress bar dana -->
-    <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
-      <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:12px;color:var(--muted)">
-        <span>Napredak mjeseca</span>
-        <span id="fn-proj-pct" style="font-family:var(--mono);color:var(--accent)"></span>
-      </div>
-      <div style="height:6px;background:var(--surface2);border-radius:3px;overflow:hidden">
-        <div id="fn-proj-bar" style="height:100%;background:linear-gradient(90deg,var(--consume),var(--accent));border-radius:3px;transition:width 1s"></div>
-      </div>
-      <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:11px;color:var(--muted)">
-        <span id="fn-proj-od"></span>
-        <span id="fn-proj-do"></span>
-      </div>
-    </div>
-  </div>
-
-  <div class="cc">
-    <h3>Mesečni troškovi i prihodi (€)</h3>
-    <div class="sub">Na temelju unesene tarife i HEP podataka · zadnjih 18 mj.</div>
-    <div class="cw h280"><canvas id="cFin"></canvas></div>
+  <div class="cc" id="card-fin-mj">
+    <h3>Mjesečni računi i otkup (€)</h3>
+    <div class="sub" id="fin-mj-sub">Zadnjih 18 mj. · stvarni račun gdje je uvezen, inače procjena · otkup viška je zasebna isplata</div>
+    <div class="cw h280"><canvas id="cFinMj"></canvas></div>
   </div>
 
 </div></div>
@@ -411,9 +354,9 @@
 <!-- ============ RAČUNI ============ -->
 <div id="page-racuni" class="page"><div class="wrap">
 
-  <div class="kpi-strip">
-    <div class="kpi grn"><div class="kpi-lbl">Ukupno plaćeno (36 mj.)</div><div class="kpi-val" id="r-ukupno">—</div><div class="kpi-sub">procjena s HEP cijenama</div></div>
-    <div class="kpi solar"><div class="kpi-lbl">Ukupno prihod (36 mj.)</div><div class="kpi-val" id="r-prihod">—</div><div class="kpi-sub">od predaje viška</div></div>
+  <div class="kpi-strip" id="r-kpi">
+    <div class="kpi"><div class="kpi-lbl">Računi · zadnjih 12 mj.</div><div class="kpi-val" id="r-ukupno">—</div><div class="kpi-sub" id="r-ukupno-sub">stvarni račun, inače procjena</div></div>
+    <div class="kpi grn"><div class="kpi-lbl">Otkup viška · zadnjih 12 mj.</div><div class="kpi-val" id="r-prihod">—</div><div class="kpi-sub" id="r-prihod-sub">isplata HEP-a za predani višak</div></div>
     <div class="kpi acc"><div class="kpi-lbl">Prosj. mjesečni račun</div><div class="kpi-val" id="r-prosj">—</div><div class="kpi-sub">zadnjih 12 mj.</div></div>
     <div class="kpi cons"><div class="kpi-lbl">Najskuplji mjesec</div><div class="kpi-val" id="r-max">—</div><div class="kpi-sub" id="r-max-sub"></div></div>
   </div>
@@ -454,9 +397,9 @@
     <div class="tbl-wrap">
       <table>
         <thead><tr>
-          <th>Razdoblje</th><th>Stvarni račun</th><th>Procjena (baza)</th><th>Razlika</th>
+          <th>Razdoblje</th><th>Stvarni račun</th><th>Procjena</th><th title="procjena − stvarni račun">Razlika</th>
           <th>Potrošnja VT</th><th>Potrošnja NT</th><th>Predaja</th>
-          <th>Opskrba</th><th>Mreža</th><th>PDV</th><th></th>
+          <th>Opskrba</th><th>Mreža</th><th>PDV</th><th>Cijene</th><th></th>
         </tr></thead>
         <tbody id="tRacuniUnos"></tbody>
       </table>
@@ -480,9 +423,9 @@
     </div>
   </div>
 
-  <div class="cc">
-    <h3>Procijenjeni račun po mjesecu</h3>
-    <div class="sub">Na temelju HEP ODS podataka i stvarnih cijena · s PDV-om 13%</div>
+  <div class="cc" id="card-racuni-graf">
+    <h3>Račun po mjesecu — procjena i stvarni</h3>
+    <div class="sub" id="r-graf-sub">Iznos za platiti (s PDV-om i fiksnim naknadama) · otkup viška je zasebna isplata</div>
     <div class="cw h280"><canvas id="cRacuni"></canvas></div>
   </div>
 
@@ -493,7 +436,8 @@
         <thead><tr>
           <th>Mjesec</th><th>Potrošnja (kWh)</th><th>Predaja (kWh)</th>
           <th>SMA solar (kWh)</th><th>Autarkija</th>
-          <th>Procj. račun</th><th>Stvarni račun</th><th>Razlika</th>
+          <th>Procjena</th><th>Izvor procjene</th><th>Stvarni račun</th><th title="procjena − stvarni račun">Razlika</th>
+          <th>Otkup viška</th><th title="račun (stvarni ako postoji, inače procjena) − otkup">Neto</th>
         </tr></thead>
         <tbody id="tRacuni"></tbody>
       </table>
@@ -505,7 +449,7 @@
 <!-- ============ DUG ============ -->
 <div id="page-dug" class="page"><div class="wrap">
 
-  <div class="kpi-strip">
+  <div class="kpi-strip" id="dug-kpi">
     <div class="kpi cons"><div class="kpi-lbl">Trenutni dug</div><div class="kpi-val" id="dug-trenutni">—</div><div class="kpi-sub" id="dug-datum"></div></div>
     <div class="kpi acc"><div class="kpi-lbl">Vrh duga</div><div class="kpi-val" id="dug-vrh">—</div><div class="kpi-sub" id="dug-vrh-mj"></div></div>
     <div class="kpi grn"><div class="kpi-lbl">Pad od vrha</div><div class="kpi-val" id="dug-pad">—</div><div class="kpi-sub">do zadnjeg računa</div></div>
@@ -513,7 +457,7 @@
   </div>
 
   <!-- Projekcija isplate -->
-  <div class="card" style="margin-bottom:14px">
+  <div class="card" id="card-dug-proj" style="margin-bottom:14px">
     <div class="card-title">📉 Projekcija isplate duga</div>
     <div style="font-size:13px;color:var(--muted);margin-bottom:12px">
       Simulacija uzima sezonski obrazac troška struje iz tvojih mjernih podataka
@@ -533,40 +477,14 @@
     <div class="cw h280"><canvas id="cDug"></canvas></div>
   </div>
 
-  <!-- Cijene oba smjera -->
-  <div class="card" style="margin-bottom:14px">
-    <div class="card-title">⚡ Cijena po kWh — kupnja vs otkup</div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px">
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Kupnja VT (viša)</div>
-        <div style="font-size:18px;color:#f87171;font-family:var(--mono)" id="dug-c-vt-buy">—</div>
-      </div>
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Kupnja NT (niža)</div>
-        <div style="font-size:18px;color:#f87171;font-family:var(--mono)" id="dug-c-nt-buy">—</div>
-      </div>
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Kupnja prosjek</div>
-        <div style="font-size:18px;color:#fbbf24;font-family:var(--mono)" id="dug-c-avg-buy">—</div>
-      </div>
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Otkup VT viška</div>
-        <div style="font-size:18px;color:#22c55e;font-family:var(--mono)" id="dug-c-vt-sell">—</div>
-      </div>
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Otkup NT viška</div>
-        <div style="font-size:18px;color:#22c55e;font-family:var(--mono)" id="dug-c-nt-sell">—</div>
-      </div>
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Pretplata (fiksno)</div>
-        <div style="font-size:18px;color:var(--muted);font-family:var(--mono)" id="dug-c-pretplata">—</div>
-      </div>
-    </div>
-    <div style="font-size:12px;color:var(--muted);margin-top:10px" id="dug-asimetrija"></div>
+  <!-- Cijene: samo jedan prigušeni red — puna razrada je na Pregledu ("Aktivne cijene") -->
+  <div class="sitno" style="margin:0 2px 14px">
+    <span id="dug-cijene">Cijene: …</span> —
+    <button class="btn-link" type="button" style="font-size:11px" onclick="otvoriCijene()">detalji na Pregledu →</button>
   </div>
 
   <!-- Povijest duga -->
-  <div class="card">
+  <div class="card" id="card-dug-pov">
     <div class="card-title">Povijest duga po računima</div>
     <div class="tbl-wrap">
       <table>
@@ -584,7 +502,7 @@
 <div id="page-isplativost" class="page"><div class="wrap">
 
   <!-- ROI / povrat investicije -->
-  <div class="card" style="margin-bottom:14px">
+  <div class="card" id="card-roi" style="margin-bottom:14px">
     <div class="card-title">💰 Povrat investicije (ROI)</div>
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px">
       <label style="font-size:13px;color:var(--muted)">Cijena sustava (€)</label>
@@ -609,14 +527,14 @@
   </div>
 
   <!-- Godišnji net-metering saldo -->
-  <div class="card" style="margin-bottom:14px">
+  <div class="card" id="card-saldo" style="margin-bottom:14px">
     <div class="card-title">🔄 Godišnji net-metering saldo</div>
     <div style="font-size:13px;color:var(--muted);margin-bottom:12px" id="saldo-razdoblje">Zadnjih 12 mjeseci</div>
     <div class="kpi-strip">
       <div class="kpi cons"><div class="kpi-lbl">Uzeto iz mreže</div><div class="kpi-val" id="saldo-uzeto">—</div><div class="kpi-sub">kWh</div></div>
       <div class="kpi solar"><div class="kpi-lbl">Predano u mrežu</div><div class="kpi-val" id="saldo-pred">—</div><div class="kpi-sub" id="saldo-pokrivenost"></div></div>
       <div class="kpi grn"><div class="kpi-lbl">Neto saldo</div><div class="kpi-val" id="saldo-neto">—</div><div class="kpi-sub">predano − uzeto</div></div>
-      <div class="kpi acc"><div class="kpi-lbl">Neto trošak</div><div class="kpi-val" id="saldo-trosak">—</div><div class="kpi-sub">plaćeno − otkup</div></div>
+      <div class="kpi acc"><div class="kpi-lbl">Neto trošak</div><div class="kpi-val" id="saldo-trosak">—</div><div class="kpi-sub" id="saldo-trosak-sub">procjena iz registara (račun − otkup)</div></div>
     </div>
     <div class="tbl-wrap" style="margin-top:14px">
       <table>
@@ -633,26 +551,26 @@
 <!-- ============ OPTIMALNO ============ -->
 <div id="page-optimalno" class="page"><div class="wrap">
 
-  <div class="cc">
+  <div class="cc" id="card-opt-sol">
     <h3>☀️ Prosječna solarna snaga po satu dana</h3>
     <div class="sub">Na temelju SMA mjernih podataka — idealni sati za pokretanje trošila</div>
     <div class="cw h280"><canvas id="cOptSol"></canvas></div>
   </div>
 
   <div class="g2">
-    <div class="cc" style="margin-bottom:0">
+    <div class="cc" id="card-opt-pot" style="margin-bottom:0">
       <h3>Prosječna potrošnja po satu</h3>
       <div class="sub">Iz HEP mjernih podataka</div>
       <div class="cw h220"><canvas id="cOptPot"></canvas></div>
     </div>
-    <div class="cc" style="margin-bottom:0">
+    <div class="cc" id="card-opt-aut" style="margin-bottom:0">
       <h3>Autarkija po satu (%)</h3>
-      <div class="sub">Koliko % potrošnje pokriva solar</div>
+      <div class="sub" id="opt-aut-sub">Koliko % potrošnje kuće u tom satu pokriva solar</div>
       <div class="cw h220"><canvas id="cOptAut"></canvas></div>
     </div>
   </div>
 
-  <div class="card" style="margin-top:14px">
+  <div class="card" id="card-opt-prep" style="margin-top:14px">
     <div class="card-title">💡 Preporuke — kada koristiti el. energiju</div>
     <div class="preporuke" id="prep"></div>
   </div>
@@ -702,12 +620,12 @@
 
   <!-- GRAFOVI -->
   <div class="g2" style="margin-bottom:14px">
-    <div class="cc" style="margin-bottom:0">
+    <div class="cc" id="card-pov1" style="margin-bottom:0">
       <h3 id="pov-chart1-title">Potrošnja i predaja</h3>
       <div class="sub" id="pov-chart1-sub">HEP ODS podaci</div>
       <div class="cw h260"><canvas id="cPov1"></canvas></div>
     </div>
-    <div class="cc" style="margin-bottom:0">
+    <div class="cc" id="card-pov2" style="margin-bottom:0">
       <h3 id="pov-chart2-title">Solarna proizvodnja</h3>
       <div class="sub">SMA inverteri (Inv1 + Inv2)</div>
       <div class="cw h260"><canvas id="cPov2"></canvas></div>
@@ -749,7 +667,7 @@
   </div>
 
   <!-- TABLICA -->
-  <div class="card">
+  <div class="card" id="card-pov-tab">
     <div class="card-title">Detaljna tablica</div>
     <div class="tbl-wrap">
       <table>
