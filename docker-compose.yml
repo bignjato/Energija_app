@@ -8,10 +8,15 @@ services:
     env_file: .env
     environment:
       - DB_PATH=/data/hep_energy.db
+      - TZ=Europe/Zagreb
     volumes:
       - hep-data:/data
+    # Samo loopback: Docker objavljene portove otvara mimo ufw-a, pa bi "5000:5000"
+    # bio dostupan s interneta (plain HTTP, lažirani X-Forwarded-For). Host nginx
+    # proxira na localhost, koji se razrješava i na 127.0.0.1 i na ::1.
     ports:
-      - "5000:5000"
+      - "127.0.0.1:5000:5000"
+      - "[::1]:5000:5000"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:5000/health"]
       interval: 30s
@@ -26,11 +31,19 @@ services:
     env_file: .env
     environment:
       - DB_PATH=/data/hep_energy.db
+      - TZ=Europe/Zagreb
     volumes:
       - hep-data:/data
     command: ["/bin/sh", "/app/sync_loop.sh"]
+    # Healthy dok sync_loop.sh dira heartbeat (nakon svakog koraka i na kraju
+    # iteracije; svaki korak ima timeout < 20 min). start_period pokriva prvu
+    # sinkronizaciju i stari heartbeat zaostao na volumenu od prošlog kontejnera.
     healthcheck:
-      disable: true
+      test: ["CMD-SHELL", "find /data/.sync_heartbeat -mmin -20 2>/dev/null | grep -q ."]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20m
     depends_on:
       hep-web:
         condition: service_started

@@ -6,7 +6,7 @@ import os
 from flask import Flask
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from .core import init_limiter, register_before_request
+from .core import SessionInterface, init_limiter, register_before_request
 from .db import init_db
 
 log = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ def create_app() -> Flask:
     if len(_secret) < 32:
         raise RuntimeError(f'SECRET_KEY prekratak ({len(_secret)} chars). Treba ≥32.')
     app.secret_key = _secret
+    app.session_interface = SessionInterface()
 
     app.config['SESSION_COOKIE_SECURE']      = os.environ.get('SESSION_COOKIE_SECURE', '1') != '0'
     app.config['SESSION_COOKIE_HTTPONLY']    = True

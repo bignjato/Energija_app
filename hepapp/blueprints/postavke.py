@@ -1,16 +1,23 @@
 """/api/postavke* + /api/postavke/korisnici + backup endpoints (admin)."""
 
-import io
+import logging
 import os
-import shutil
+import sqlite3
+import tempfile
 from datetime import datetime
 
-from flask import Blueprint, jsonify, request, send_file
+from flask import Blueprint, jsonify, request, send_file, session
 
-from ..core import admin_required, hash_password
+from ..core import admin_required, hash_password, session_fingerprint
 from ..db import DB_PATH, get_db, get_config, set_config
 
+log = logging.getLogger(__name__)
+
 bp = Blueprint('postavke', __name__, url_prefix='/api/postavke')
+
+DOZVOLJENE_ULOGE = ('admin', 'viewer')
+
+ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), '.env')
 
 # Ključevi pohranjeni isključivo u config tablici (ne u .env)
 DB_ONLY_KEYS = [
@@ -29,7 +36,7 @@ DB_ONLY_KEYS = [
 @bp.route('', methods=['GET', 'POST'])
 @admin_required
 def api_postavke():
-    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), '.env')
+    env_path = ENV_PATH
 
     safe_keys = ['HEP_USERNAME', 'HEP_SIFRA', 'SMA_USERNAME', 'SMA_PLANT_ID',
                  'SMA_INV1_ID', 'SMA_INV2_ID', 'HA_URL', 'TARIFA_VT', 'TARIFA_NT',
@@ -69,11 +76,20 @@ def api_postavke():
     SECRET_KEYS = {'HEP_PASSWORD', 'SMA_PASSWORD', 'HA_TOKEN', 'DASHBOARD_PASSWORD',
                    'SMA_CLIENT_ID'}
     secret_changed = False
+    env_changed = False
+    tarifa_poslana = False
     for key in all_keys:
         if key in data and data[key] != '':
-            existing[key] = data[key]
-            if key in SECRET_KEYS:
-                secret_changed = True
+            if key.startswith('TARIFA_'):
+                # ne cita se iz .env-a (vidi poruku dolje) — nije "env promjena"
+                tarifa_poslana = True
+            elif str(existing.get(key, os.environ.get(key, ''))) != str(data[key]):
+                # UI uvijek salje i nepromijenjena (prefillana) polja — upozorenje
+                # samo kad se vrijednost stvarno razlikuje
+                env_changed = True
+                if key in SECRET_KEYS:
+                    secret_changed = True
+            existing[key] = str(data[key])   # os.environ prima samo str
     # Zabiljezi datum promjene tajni (za check_token_age podsjetnik o rotaciji)
     if secret_changed:
         set_config('_secrets_updated', datetime.now().strftime('%Y-%m-%d'))
@@ -110,9 +126,26 @@ def api_postavke():
     for k, v in existing.items():
         os.environ[k] = v
 
+    # .env unutar web kontejnera ne cita nitko (sync dobiva okolinu iz hostovog
+    # .env preko docker-compose env_file) i nestaje kad se kontejner rekreira.
+    poruke = []
+    if env_changed:
+        poruke.append('Ove vrijednosti (HEP/SMA/HA pristupni podaci, DASHBOARD_PASSWORD) '
+                      'zapisane su samo privremeno unutar web kontejnera i NE '
+                      'primjenjuju se na sync. Vrijede tek kad ih promijeniš i u .env '
+                      'datoteci na serveru i ponovno kreiraš kontejnere '
+                      '(docker compose up -d --force-recreate).')
+    # TARIFA_*: get_config cita config tablicu (init_db je uvijek popuni) prije
+    # okoline, pa ni .env na serveru tu nista ne mijenja; cijene idu s racuna.
+    if tarifa_poslana:
+        poruke.append('TARIFA_* vrijednosti se odavde NE primjenjuju (ni preko .env '
+                      'datoteke na serveru): jedinične cijene uzimaju se s uvezenih '
+                      'računa, a sati VT/NT iz config tablice u bazi.')
     return jsonify({
         'ok': True,
-        'warning': 'Promjene credentialsa vrijede tek nakon restarta sync kontejnera.',
+        'warning': ' '.join(poruke),
+        'env_restart_required': env_changed,
+        'tarifa_ignored': tarifa_poslana,
     })
 
 
@@ -200,16 +233,45 @@ def api_korisnici():
 
         if request.method == 'POST':
             d = request.get_json() or {}
-            username = d.get('username', '').strip()
+            username = d.get('username', '')
             password = d.get('password', '')
             uloga    = d.get('uloga', 'viewer')
+            if not isinstance(username, str) or not isinstance(password, str):
+                return jsonify({'ok': False, 'error': 'Korisnik i lozinka su obavezni'})
+            username = username.strip()
             if not username or not password:
                 return jsonify({'ok': False, 'error': 'Korisnik i lozinka su obavezni'})
-            conn.execute(
-                'INSERT OR REPLACE INTO korisnici (username, password_hash, uloga) VALUES (?, ?, ?)',
-                (username, hash_password(password), uloga),
-            )
+            if uloga not in DOZVOLJENE_ULOGE:
+                return jsonify({'ok': False, 'error': 'Nepoznata uloga (dozvoljeno: admin, viewer)'})
+            pw_hash = hash_password(password)
+            # BEGIN IMMEDIATE: provjera zadnjeg admina i upis u istoj transakciji
+            conn.execute('BEGIN IMMEDIATE')
+            postojeci = conn.execute(
+                'SELECT uloga, aktivan FROM korisnici WHERE username=?', (username,)
+            ).fetchone()
+            if postojeci:
+                if postojeci['uloga'] == 'admin' and postojeci['aktivan'] and uloga != 'admin':
+                    admins = conn.execute(
+                        "SELECT COUNT(*) FROM korisnici WHERE uloga='admin' AND aktivan=1"
+                    ).fetchone()[0]
+                    if admins <= 1:
+                        conn.rollback()
+                        return jsonify({'ok': False, 'error': 'Ne možete degradirati zadnjeg admina!'})
+                # UPDATE (ne INSERT OR REPLACE) — id, aktivan, stvoren, zadnja_prijava ostaju
+                conn.execute(
+                    'UPDATE korisnici SET password_hash=?, uloga=? WHERE username=?',
+                    (pw_hash, uloga, username),
+                )
+            else:
+                conn.execute(
+                    'INSERT INTO korisnici (username, password_hash, uloga) VALUES (?, ?, ?)',
+                    (username, pw_hash, uloga),
+                )
             conn.commit()
+            # Promjena lozinke invalidira sve sesije tog korisnika; vlastitu
+            # (ovu) osvjezi da se admin ne odjavi sam sebi usred rada.
+            if session.get('auth_src') == 'db' and session.get('username') == username:
+                session['pwfp'] = session_fingerprint(pw_hash)
             return jsonify({'ok': True})
 
         # DELETE
@@ -229,34 +291,76 @@ def api_korisnici():
         conn.close()
 
 
+def _online_backup(dest_path: str):
+    """Konzistentna kopija baze preko sqlite online backup API-ja.
+
+    Sirovo kopiranje datoteke u WAL modu (dok sync pise) moze dati
+    potrganu ili zastarjelu kopiju — backup API cita kroz SQLite.
+    """
+    src = get_db()
+    try:
+        dst = sqlite3.connect(dest_path)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+
+
 @bp.route('/backup')
 @admin_required
 def api_backup():
-    """Download backup baze (BytesIO, bez tempfile leaka)."""
+    """Download backup baze (online backup u temp datoteku, pa stream)."""
+    tmp_path = None
     try:
-        with open(DB_PATH, 'rb') as f:
-            data = io.BytesIO(f.read())
-        data.seek(0)
+        fd, tmp_path = tempfile.mkstemp(prefix='hep_backup_', suffix='.db')
+        os.close(fd)
+        _online_backup(tmp_path)
+        f = open(tmp_path, 'rb')
+        size = os.fstat(f.fileno()).st_size
         datum = datetime.now().strftime('%Y%m%d_%H%M')
-        return send_file(data, as_attachment=True,
+        resp = send_file(f, as_attachment=True,
                          download_name=f'hep_energy_backup_{datum}.db',
                          mimetype='application/octet-stream')
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        resp.headers['Content-Length'] = str(size)
+        return resp
+    except Exception:
+        log.exception('Backup download nije uspio')
+        return jsonify({'error': 'Backup nije uspio — vidi server log'}), 500
+    finally:
+        # Otvoreni handle ostaje citljiv i nakon unlinka (POSIX), pa temp
+        # datoteka nestaje i ako klijent prekine download.
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 @bp.route('/backup/auto', methods=['POST'])
 @admin_required
 def api_backup_auto():
     backup_dir = os.path.join(os.path.dirname(DB_PATH), 'backups')
-    os.makedirs(backup_dir, exist_ok=True)
     datum = datetime.now().strftime('%Y%m%d_%H%M')
     backup_path = os.path.join(backup_dir, f'hep_energy_{datum}.db')
+    tmp_path = backup_path + '.tmp'
     try:
-        shutil.copy2(DB_PATH, backup_path)
+        os.makedirs(backup_dir, exist_ok=True)
+        # prvo u .tmp pa rename — prekinuti backup ne ostavlja polovicnu .db
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        _online_backup(tmp_path)
+        os.replace(tmp_path, backup_path)
         backups = sorted(f for f in os.listdir(backup_dir) if f.endswith('.db'))
         for old in backups[:-7]:
             os.remove(os.path.join(backup_dir, old))
         return jsonify({'ok': True, 'path': backup_path, 'n_backups': len(backups)})
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)})
+    except Exception:
+        log.exception('Auto backup nije uspio')
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        return jsonify({'ok': False, 'error': 'Backup nije uspio — vidi server log'})

@@ -30,8 +30,7 @@ Setup wizard se aktivira samo na čistim instalacijama (postojeće — s users +
 ```bash
 # Deploy nakon git pull
 cd /programi/hep_ha
-git pull origin main
-docker compose up -d --build
+./deploy.sh
 
 # Logovi
 docker logs -f hep-energy-web
@@ -48,6 +47,34 @@ docker exec -it hep-energy-web sqlite3 /data/hep_energy.db
 docker run --rm -v "$PWD":/app -w /app python:3.12-slim \
   sh -c "pip install -q flask requests pytest && python -m pytest tests/ -q"
 ```
+
+## Konvencije podataka (provjereno prema brojilu i računima — ne mijenjati napamet)
+
+- **Vremenska zona**: oba kontejnera rade s `TZ=Europe/Zagreb`. Python `datetime.now()` je lokalno
+  vrijeme; SQLite `date('now')`/`datetime('now')` su i dalje UTC — za lokalno koristi modifikator
+  `'localtime'` ili pomoćne funkcije iz `hepapp/timeutil.py`.
+- **Formati vremena u bazi**:
+  - HEP (`ocitanja_15min/satna.ts`, `ocitanja_dnevna.datum`): lokalno, bez offseta, `YYYY-MM-DDTHH:MM:SS`
+  - `sma_live.ts`: UTC s offsetom (`...+00:00`); `sma_15min.ts`: UTC sa `Z`; `sma_dnevna.datum`: lokalni dan
+  - `sync_log.ts`: UTC s razmakom (`YYYY-MM-DD HH:MM:SS`)
+  - Nikad ne uspoređuj `T`-format s `datetime('now')` (leksički `'T' > ' '` pa cijeli današnji dan ispadne).
+- **HEP 15-min uzorak nosi oznaku KRAJA intervala**: uzorak `T` pokriva `(T-15min, T]`. Satna/dnevna
+  agregacija pripisuje ga početku intervala (`ts, '-15 minutes'`). S tim se mjesečne sume poklapaju s
+  registrima brojila do ~0,3 kWh.
+- **VT/NT**: VT je 07–21 zimi i 08–22 ljeti (= 06–20 UTC cijele godine). `TARIFA_VT_OD/DO` su zimski sati.
+  Klasifikacija ide kroz `timeutil` (ne fiksni lokalni sati).
+- **Cijene**: `hepapp/tariff.py` — `get_tarifa(datum)` kreće od ugrađenog cjenika po datumu važenja
+  (`TARIFE`) i prekriva ga jediničnim cijenama sa zadnjeg uvezenog računa (`racuni.cijene_json`,
+  parser ih čita iz PDF-a). Povijesni mjeseci se računaju po tadašnjem cjeniku (`datum=`).
+  `tests/test_tariff.py` drži regresiju protiv stvarnih računa (±5 centi).
+- **`sma_dnevna` ima više pisača** (HA puller = današnji red; `sma_history_import` = samo PV kolone;
+  `maintenance.backfill_daily` = popunjava NULL-ove iz `sma_live`). Nikad `INSERT OR REPLACE` u tu
+  tablicu — briše tuđe kolone. Samo `ON CONFLICT(datum) DO UPDATE` vlastitih kolona.
+- **Deploy**: samo `./deploy.sh` (git pull → build → up -d → čeka healthy). Ne `docker cp` u kontejner
+  (gubi se pri recreate). Web port je vezan na loopback; javno ide isključivo kroz nginx.
+- **Poznata ograničenja**: sat koji se ponavlja pri prelasku na zimsko vrijeme sudara se na
+  `UNIQUE(mjerno_mjesto, ts)` (~5 kWh/god fali u dnevnim sumama); postavke koje UI piše u `.env`
+  unutar web kontejnera ne dolaze do sync kontejnera (vrijedi serverski `.env`).
 
 ## Sigurnosne note
 

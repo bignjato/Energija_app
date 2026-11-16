@@ -59,6 +59,8 @@ const yS=()=>new Date().getFullYear()+'-01-01';
 const sumK=(arr,k)=>arr.reduce((a,b)=>a+(+b[k]||0),0);
 const avgK=(arr,k)=>{const v=arr.filter(r=>r[k]!=null).map(r=>+r[k]);return v.length?v.reduce((a,b)=>a+b)/v.length:0;};
 const set=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v;};
+// HTML-escape za sve ne-numeričke vrijednosti koje idu u innerHTML (XSS)
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 // ---- MULTI-OMM ----
 let selectedOMM = localStorage.getItem('omm') || '';
@@ -81,7 +83,7 @@ async function loadOmmList(){
     sel.innerHTML = list.map(o=>{
       const ime = o.naziv || o.id;
       const adr = o.adresa ? ` · ${o.adresa}` : '';
-      return `<option value="${o.id}">${ime}${adr} (${o.id})</option>`;
+      return `<option value="${esc(o.id)}">${esc(ime)}${esc(adr)} (${esc(o.id)})</option>`;
     }).join('');
     sel.value = selectedOMM || list[0].id;
     sel.style.display = '';
@@ -177,9 +179,13 @@ function renderPregled(){
   const all=D.sma_dnevna.filter(r=>r.pv_generation_kwh>0);
   set('k-pr-s',f1(all.length?sumK(all,'pv_generation_kwh')/all.length:0));
 
-  mkChart('cSatni','line',D.satna.slice(-96).map(r=>r.ts.slice(11,16)),[
-    {label:'HEP potrošnja (kWh)',data:D.satna.slice(-96).map(r=>r.kwh_plus||0),borderColor:'#a78bfa',backgroundColor:'rgba(167,139,250,.07)',fill:true,tension:.4,pointRadius:0,borderWidth:2},
-    {label:'SMA solar (kWh)',data:D.sma_satna.slice(-96).map(r=>(r.pv_w||0)/1000),borderColor:'#fbbf24',backgroundColor:'rgba(251,191,36,.07)',fill:true,tension:.4,pointRadius:0,borderWidth:2},
+  // SMA sat se spaja s HEP satom po ključu (oba lokalni početak sata), ne po
+  // indeksu — HEP kasni ~1 dan pa nizovi ne završavaju u istom satu.
+  const smaPoSatu=new Map((D.sma_satna||[]).map(r=>[r.sat,r]));
+  const sat96=D.satna.slice(-96);
+  mkChart('cSatni','line',sat96.map(r=>r.ts.slice(11,16)),[
+    {label:'HEP potrošnja (kWh)',data:sat96.map(r=>r.kwh_plus||0),borderColor:'#a78bfa',backgroundColor:'rgba(167,139,250,.07)',fill:true,tension:.4,pointRadius:0,borderWidth:2},
+    {label:'SMA solar (kWh)',data:sat96.map(r=>{const m=smaPoSatu.get(r.ts);return m?(m.pv_w||0)/1000:null;}),spanGaps:false,borderColor:'#fbbf24',backgroundColor:'rgba(251,191,36,.07)',fill:true,tension:.4,pointRadius:0,borderWidth:2},
   ],'kWh');
 
   const h30=D.dnevna.slice(-30);
@@ -229,7 +235,7 @@ async function renderUsporedba(){
 window._usporedbaPeriod = window._usporedbaPeriod || 'month';
 
 function _periodRange(period) {
-  const danas = new Date(today());
+  const danas = new Date();
   const y = danas.getFullYear(), m = danas.getMonth();
   let od, do_, label;
   if (period === 'day')   { od = today(); do_ = today(); label = 'danas'; }
@@ -237,7 +243,7 @@ function _periodRange(period) {
     const d = new Date(danas);
     const dow = (d.getDay() + 6) % 7;   // ponedjeljak = 0
     d.setDate(d.getDate() - dow);
-    od = d.toISOString().slice(0,10); do_ = today();
+    od = localDate(d); do_ = today();
     label = 'ovaj tjedan (od pon)';
   }
   else if (period === 'month') {
@@ -297,7 +303,7 @@ function renderUsporedbaPeriod() {
     const dp=(row.hep_potrosnja||0)-(row.sma_mreza||0);
     const dr=(row.hep_predaja||0)-(row.sma_predaja||0);
     tb.innerHTML+=`<tr>
-      <td>${row.datum}</td>
+      <td>${esc(row.datum)}</td>
       <td class="c-consume">${f1(row.hep_potrosnja)}</td><td>${f1(row.sma_mreza)}</td>
       <td class="${Math.abs(dp)>2?(dp>0?'neg':'pos'):'c-muted'}">${sgn(dp)+f1(dp)}</td>
       <td class="c-feed">${f1(row.hep_predaja)}</td><td>${f1(row.sma_predaja)}</td>
@@ -421,7 +427,7 @@ async function loadRegistri(){
     tb.innerHTML='';
     mj.forEach(m=>{
       tb.innerHTML+=`<tr>
-        <td>${m.mjesec}</td>
+        <td>${esc(m.mjesec)}</td>
         <td class="c-consume">${f1(m.vt_kwh)}</td>
         <td class="c-consume">${f1(m.nt_kwh)}</td>
         <td><strong>${f1(m.ukupno_kwh)}</strong></td>
@@ -518,13 +524,13 @@ async function uploadPdf(){
     if (d.dug != null)             extras.push(`dug ${d.dug.toFixed(2)} €`);
     if (d.datum_dospijeca)         extras.push(`dospijeće ${d.datum_dospijeca}`);
     if (d.model_tarife)            extras.push(d.model_tarife);
-    status.innerHTML = `✓ Prepoznato ${filled}/${allFields.length} polja iz "${d.filename}".`
-      + (extras.length ? ` <span style="color:var(--muted)">(${extras.join(' · ')})</span>` : '')
+    status.innerHTML = `✓ Prepoznato ${filled}/${allFields.length} polja iz "${esc(d.filename)}".`
+      + (extras.length ? ` <span style="color:var(--muted)">(${esc(extras.join(' · '))})</span>` : '')
       + ` Klikni "Spremi račun".`;
     if (d.warning) {
       status.innerHTML += `<div style="margin-top:8px;padding:8px 10px;border-radius:6px;`
         + `background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.4);color:#fbbf24;font-size:12px">`
-        + `⚠️ ${d.warning}</div>`;
+        + `⚠️ ${esc(d.warning)}</div>`;
     }
   } catch(e) {
     status.textContent = 'Network error: ' + e;
@@ -560,7 +566,7 @@ async function loadVtKalibracija(){
 
     let html = `<div style="margin-bottom:10px;color:var(--muted)">
       <strong style="color:var(--text)">Stvarni VT udio iz HEP satnih očitanja</strong>
-      (sat ${d.vt_od}-${d.vt_do}h, zadnjih ${valid.length} mj.):
+      (sat ${esc(d.vt_od)}-${esc(d.vt_do)}h, zadnjih ${valid.length} mj.):
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
       <div style="border:1px solid var(--border);border-radius:6px;padding:10px">
@@ -583,16 +589,16 @@ async function loadVtKalibracija(){
       </tr></thead><tbody>`;
     for (const m of valid) {
       html += `<tr>
-        <td style="padding:4px;font-family:var(--mono)">${m.mjesec}</td>
-        <td style="padding:4px;text-align:right;font-family:var(--mono)">${m.ukupno_kwh}</td>
-        <td style="padding:4px;text-align:right;font-family:var(--mono)">${m.vt_simple_perc ?? '—'}%</td>
-        <td style="padding:4px;text-align:right;font-family:var(--mono)">${m.vt_workdays_perc ?? '—'}%</td>
+        <td style="padding:4px;font-family:var(--mono)">${esc(m.mjesec)}</td>
+        <td style="padding:4px;text-align:right;font-family:var(--mono)">${esc(m.ukupno_kwh)}</td>
+        <td style="padding:4px;text-align:right;font-family:var(--mono)">${esc(m.vt_simple_perc ?? '—')}%</td>
+        <td style="padding:4px;text-align:right;font-family:var(--mono)">${esc(m.vt_workdays_perc ?? '—')}%</td>
       </tr>`;
     }
     html += '</tbody></table>';
     box.innerHTML = html;
   } catch(e) {
-    box.innerHTML = '<div style="color:#f87171">Greška: ' + e + '</div>';
+    box.innerHTML = '<div style="color:#f87171">Greška: ' + esc(e) + '</div>';
   }
 }
 
@@ -611,7 +617,11 @@ function renderRacuni(){
 
   // KPI iz procjene
   const ukupno=mj.reduce((a,b)=>a+(b.procj_racun||0),0);
-  const prihod=mj.reduce((a,b)=>a+(b.hep_predaja||0)*0.064379,0);
+  // Otkupna cijena iz aktivne tarife (račun/cjenik) koju šalje server, ne konstanta;
+  // ako red nosi vlastitu cijenu mjeseca (otkup_cijena), ona ima prednost
+  const otk=Number(R.tarifa?.otkup)||0;
+  const prihodMj=r=>(r.hep_predaja||0)*(r.otkup_cijena??otk);
+  const prihod=mj.reduce((a,b)=>a+prihodMj(b),0);
   const zadnjih12=mj.slice(0,12);
   const prosj=zadnjih12.reduce((a,b)=>a+(b.procj_racun||0),0)/Math.max(zadnjih12.length,1);
   const maxR=mj.reduce((a,b)=>b.procj_racun>a.val?{val:b.procj_racun,mj:b.mjesec}:a,{val:0,mj:''});
@@ -636,19 +646,22 @@ function renderRacuni(){
       const diff = procj - r.iznos;
       const per = r.period.slice(5)+'/'+r.period.slice(0,4);
       tb2.innerHTML+=`<tr>
-        <td style="font-weight:600">${per}</td>
+        <td style="font-weight:600">${esc(per)}</td>
         <td class="c-solar">${eur(-r.iznos)}</td>
         <td>${procj?eur(-procj):'—'}</td>
         <td class="${Math.abs(diff)<30?'c-green':Math.abs(diff)<80?'c-solar':'neg'}">${procj?sgn(diff)+f2(diff)+' €':'—'}</td>
-        <td>${r.kwh_vt!=null?r.kwh_vt+' kWh':'—'}</td>
-        <td>${r.kwh_nt!=null?r.kwh_nt+' kWh':'—'}</td>
-        <td class="c-feed">${r.kwh_minus!=null?r.kwh_minus+' kWh':'—'}</td>
+        <td>${r.kwh_vt!=null?esc(r.kwh_vt)+' kWh':'—'}</td>
+        <td>${r.kwh_nt!=null?esc(r.kwh_nt)+' kWh':'—'}</td>
+        <td class="c-feed">${r.kwh_minus!=null?esc(r.kwh_minus)+' kWh':'—'}</td>
         <td>${r.opskrba!=null?eur(-r.opskrba):'—'}</td>
         <td>${r.mreza!=null?eur(-r.mreza):'—'}</td>
         <td>${r.pdv!=null?eur(-r.pdv):'—'}</td>
-        <td><button onclick="deleteRacun('${r.period}')" style="background:none;border:none;color:var(--grid-out);cursor:pointer;font-size:14px">✕</button></td>
+        <td><button data-racun-period="${esc(r.period)}" style="background:none;border:none;color:var(--grid-out);cursor:pointer;font-size:14px">✕</button></td>
       </tr>`;
     });
+    // Brisanje preko data-racun-period + listenera (ne inline onclick s interpoliranom vrijednošću);
+    // ne data-period — taj atribut već koriste gumbi filtera perioda u Usporedbi
+    tb2.querySelectorAll('button[data-racun-period]').forEach(b=>b.addEventListener('click',()=>deleteRacun(b.dataset.racunPeriod)));
   }
 
   // Graf
@@ -656,7 +669,7 @@ function renderRacuni(){
   mkChart('cRacuni','bar',last24.map(r=>r.mjesec),[
     {label:'Procj. račun (€)',data:last24.map(r=>-(r.procj_racun||0)),backgroundColor:'rgba(248,113,113,.7)',borderRadius:3},
     {label:'Stvarni račun (€)',data:last24.map(r=>{const rc=racuniMap[r.mjesec];return rc?-rc.iznos:null;}),backgroundColor:'rgba(251,191,36,.8)',borderRadius:3},
-    {label:'Prihod predaja (€)',data:last24.map(r=>(r.hep_predaja||0)*0.064379),backgroundColor:'rgba(52,211,153,.7)',borderRadius:3},
+    {label:'Prihod predaja (€)',data:last24.map(prihodMj),backgroundColor:'rgba(52,211,153,.7)',borderRadius:3},
   ],'€');
 
   // Tablica svih mjeseci
@@ -666,7 +679,7 @@ function renderRacuni(){
     const rc=racuniMap[row.mjesec];
     const diff=rc ? row.procj_racun-rc.iznos : null;
     tb.innerHTML+=`<tr>
-      <td style="font-weight:600">${row.mjesec}</td>
+      <td style="font-weight:600">${esc(row.mjesec)}</td>
       <td class="c-consume">${f1(row.hep_potrosnja)}</td>
       <td class="c-feed">${f1(row.hep_predaja)}</td>
       <td class="c-solar">${row.sma_pv!=null?f1(row.sma_pv):'—'}</td>
@@ -785,8 +798,9 @@ function renderPovijest(){
   const totM=hep.reduce((a,b)=>a+(b.kwh_minus||0),0);
   const totSol=sma.reduce((a,b)=>a+(b.pv_kwh||b.pv_generation_kwh||0),0);
   const neto=totM-totP;
-  const t=D?.tarifa;
-  const cp=t?.cijena_kupnja||0.12, cs=t?.cijena_prodaja||0.065;
+  // Iste efektivne cijene (iz aktivne tarife/računa) kao u renderFin, ne legacy tablica tarife
+  const ec=D?.efektivne_cijene || {kupnja_avg:0.17, prodaja:0.065};
+  const cp=ec.kupnja_avg, cs=ec.prodaja;
   const finNeto=totM*cs-totP*cp;
 
   document.getElementById('pov-kpi').innerHTML=`
@@ -795,7 +809,7 @@ function renderPovijest(){
     <div class="kpi solar"><div class="kpi-lbl">Solar (SMA)</div><div class="kpi-val c-solar">${f1(totSol)}</div><div class="kpi-sub">kWh</div></div>
     <div class="kpi ${neto>=0?'grn':'cons'}"><div class="kpi-lbl">Neto bilanca</div><div class="kpi-val ${neto>=0?'c-green':'c-grid'}">${sgn(neto)+f1(neto)}</div><div class="kpi-sub">kWh</div></div>
     <div class="kpi ${finNeto>=0?'grn':'cons'}"><div class="kpi-lbl">Financijski neto</div><div class="kpi-val ${finNeto>=0?'pos':'neg'}">${eur(finNeto)}</div><div class="kpi-sub">prihod − trošak</div></div>
-    <div class="kpi acc"><div class="kpi-lbl">Period</div><div class="kpi-val" style="font-size:14px">${hep.length} ${res==='hour'?'sati':res==='week'?'tjedana':'dana'}</div><div class="kpi-sub">${od} — ${doo}</div></div>
+    <div class="kpi acc"><div class="kpi-lbl">Period</div><div class="kpi-val" style="font-size:14px">${hep.length} ${res==='hour'?'sati':res==='week'?'tjedana':'dana'}</div><div class="kpi-sub">${esc(od)} — ${esc(doo)}</div></div>
   `;
 
   // Graf 1 - HEP
@@ -856,25 +870,25 @@ function renderPovijest(){
 
     if(res==='week'){
       tb.innerHTML+=`<tr>
-        <td style="font-weight:600">${row.tjedan}</td>
-        <td class="c-muted">${row.datum_od||''}</td>
+        <td style="font-weight:600">${esc(row.tjedan)}</td>
+        <td class="c-muted">${esc(row.datum_od||'')}</td>
         <td class="c-consume">${f1(row.kwh_plus)}</td>
         <td class="c-feed">${f1(row.kwh_minus)}</td>
         <td class="c-solar">${pv?f1(pv):'—'}</td>
-        <td class="c-muted">${row.n_dana}</td>
+        <td class="c-muted">${esc(row.n_dana)}</td>
         <td class="${n>=0?'pos':'neg'}">${sgn(n)+f1(n)}</td>
       </tr>`;
     } else if(res==='hour'){
       const ts=row.ts||row.sat;
       tb.innerHTML+=`<tr>
-        <td style="font-family:var(--mono)">${ts?ts.slice(0,16):''}</td>
+        <td style="font-family:var(--mono)">${esc(ts?ts.slice(0,16):'')}</td>
         <td class="c-consume">${f2(row.kwh_plus)}</td>
         <td class="c-feed">${f2(row.kwh_minus)}</td>
         <td class="c-solar">${pv?f2(pv):'—'}</td>
       </tr>`;
     } else {
       tb.innerHTML+=`<tr>
-        <td style="font-weight:600">${row.datum}</td>
+        <td style="font-weight:600">${esc(row.datum)}</td>
         <td class="c-consume">${f1(row.kwh_plus)}</td>
         <td class="c-feed">${f1(row.kwh_minus)}</td>
         <td class="c-solar">${pv?f1(pv):'—'}</td>
@@ -1042,7 +1056,7 @@ function renderSaldo(S){
   set('saldo-neto', sgn(t.neto_saldo_kwh)+f0(t.neto_saldo_kwh)+' kWh');
   set('saldo-trosak', eur(t.neto_trosak_eur));
   tb.innerHTML = (S.mjeseci||[]).map(m=>`<tr>
-    <td>${m.mjesec}</td><td>${f0(m.uzeto_kwh)}</td><td>${f0(m.pred_kwh)}</td>
+    <td>${esc(m.mjesec)}</td><td>${f0(m.uzeto_kwh)}</td><td>${f0(m.pred_kwh)}</td>
     <td>${eur(m.racun_eur)}</td><td style="color:#22c55e">${eur(m.otkup_eur)}</td>
     <td style="color:#22c55e">${eur(m.korist_eur)}</td></tr>`).join('');
 }
@@ -1171,19 +1185,19 @@ async function loadPostavke(){
     const s=await fetch('/api/postavke/status');
     const stat=await s.json();
     document.getElementById('status-kpi').innerHTML=`
-      <div class="kpi acc"><div class="kpi-lbl">Verzija</div><div class="kpi-val" style="font-size:16px">${stat.version}</div><div class="kpi-sub">HEP Energy Monitor</div></div>
-      <div class="kpi solar"><div class="kpi-lbl">HEP zadnji sync</div><div class="kpi-val" style="font-size:14px">${stat.hep_last_sync?stat.hep_last_sync.slice(0,16):'—'}</div><div class="kpi-sub">${stat.hep_range?.od||'—'} — ${stat.hep_range?.do||'—'}</div></div>
-      <div class="kpi solar"><div class="kpi-lbl">SMA zadnji sync</div><div class="kpi-val" style="font-size:14px">${stat.sma_last_sync?stat.sma_last_sync.slice(0,16):'—'}</div><div class="kpi-sub">${stat.sma_range?.od?.slice(0,10)||'—'} — ${stat.sma_range?.do?.slice(0,10)||'—'}</div></div>
-      <div class="kpi grn"><div class="kpi-lbl">Baza podataka</div><div class="kpi-val" style="font-size:16px">${stat.db_size_mb} MB</div><div class="kpi-sub">HEP: ${(stat.tables?.ocitanja_15min||0).toLocaleString()} zapisa</div></div>
+      <div class="kpi acc"><div class="kpi-lbl">Verzija</div><div class="kpi-val" style="font-size:16px">${esc(stat.version)}</div><div class="kpi-sub">HEP Energy Monitor</div></div>
+      <div class="kpi solar"><div class="kpi-lbl">HEP zadnji sync</div><div class="kpi-val" style="font-size:14px">${esc(stat.hep_last_sync?stat.hep_last_sync.slice(0,16):'—')}</div><div class="kpi-sub">${esc(stat.hep_range?.od||'—')} — ${esc(stat.hep_range?.do||'—')}</div></div>
+      <div class="kpi solar"><div class="kpi-lbl">SMA zadnji sync</div><div class="kpi-val" style="font-size:14px">${esc(stat.sma_last_sync?stat.sma_last_sync.slice(0,16):'—')}</div><div class="kpi-sub">${esc(stat.sma_range?.od?.slice(0,10)||'—')} — ${esc(stat.sma_range?.do?.slice(0,10)||'—')}</div></div>
+      <div class="kpi grn"><div class="kpi-lbl">Baza podataka</div><div class="kpi-val" style="font-size:16px">${esc(stat.db_size_mb)} MB</div><div class="kpi-sub">HEP: ${(stat.tables?.ocitanja_15min||0).toLocaleString()} zapisa</div></div>
       <div class="kpi cons"><div class="kpi-lbl">SMA 15-min</div><div class="kpi-val" style="font-size:16px">${(stat.tables?.sma_15min||0).toLocaleString()}</div><div class="kpi-sub">zapisa</div></div>
       <div class="kpi feed"><div class="kpi-lbl">SMA live</div><div class="kpi-val" style="font-size:16px">${(stat.tables?.sma_live||0).toLocaleString()}</div><div class="kpi-sub">zapisa</div></div>
     `;
 
     document.getElementById('app-info').innerHTML=`
-      <div class="summary-item ok"><div class="label">URL</div><div class="value">${location.hostname}</div></div>
-      <div class="summary-item ok"><div class="label">HEP ODS</div><div class="value">${cfg.HEP_USERNAME||'—'}</div></div>
-      <div class="summary-item ${cfg.SMA_USERNAME?'ok':'skip'}"><div class="label">SMA</div><div class="value">${cfg.SMA_USERNAME||'Nije konfigurirano'}</div></div>
-      <div class="summary-item ${cfg.HA_URL?'ok':'skip'}"><div class="label">Home Assistant</div><div class="value">${cfg.HA_URL||'Nije konfigurirano'}</div></div>
+      <div class="summary-item ok"><div class="label">URL</div><div class="value">${esc(location.hostname)}</div></div>
+      <div class="summary-item ok"><div class="label">HEP ODS</div><div class="value">${esc(cfg.HEP_USERNAME||'—')}</div></div>
+      <div class="summary-item ${cfg.SMA_USERNAME?'ok':'skip'}"><div class="label">SMA</div><div class="value">${esc(cfg.SMA_USERNAME||'Nije konfigurirano')}</div></div>
+      <div class="summary-item ${cfg.HA_URL?'ok':'skip'}"><div class="label">Home Assistant</div><div class="value">${esc(cfg.HA_URL||'Nije konfigurirano')}</div></div>
     `;
 
     // Korisnici
@@ -1218,10 +1232,17 @@ async function savePostavke(){
   try{
     const r=await fetch('/api/postavke',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
     const d=await r.json();
-    if(d.ok){
-      document.getElementById('cfg-status').textContent='✓ Spremljeno';
+    const st=document.getElementById('cfg-status');
+    if(d.ok && d.warning){
+      // Server je spremio, ali uz upozorenje (npr. vrijednost ne dolazi do sync kontejnera) — ostaje vidljivo
+      st.textContent='⚠ Spremljeno uz upozorenje: '+d.warning;
+      showToast(d.env_restart_required?'Spremljeno — potrebna izmjena .env na serveru!':'Spremljeno uz upozorenje!');
+    } else if(d.ok){
+      st.textContent='✓ Spremljeno';
       showToast('Konfiguracija spremljena!');
-      setTimeout(()=>document.getElementById('cfg-status').textContent='',3000);
+      setTimeout(()=>st.textContent='',3000);
+    } else {
+      st.textContent='✗ Greška'+(d.error?': '+d.error:'');
     }
   }catch(e){document.getElementById('cfg-status').textContent='✗ Greška';}
 }
@@ -1239,13 +1260,13 @@ async function runImport(tip){
   };
 
   try{
-    out.innerHTML+=`▶ ${tip} import...<br>`;
+    out.innerHTML+=`▶ ${esc(tip)} import...<br>`;
     const r=await fetch(endpoints[tip],{method:'POST'});
     const d=await r.json();
-    out.innerHTML+=`✓ ${d.info||'Gotovo'}<br>`;
+    out.innerHTML+=`✓ ${esc(d.info||'Gotovo')}<br>`;
     showToast('Import završen!');
   }catch(e){
-    out.innerHTML+=`✗ Greška: ${e.message}<br>`;
+    out.innerHTML+=`✗ Greška: ${esc(e.message)}<br>`;
   }
   out.scrollTop=out.scrollHeight;
 }
@@ -1262,12 +1283,14 @@ async function loadKorisnici(){
     }
     korisnici.forEach(k=>{
       tb.innerHTML+=`<tr>
-        <td style="padding:9px 12px">${k.username}</td>
-        <td style="padding:9px 12px"><span style="background:${k.uloga==='admin'?'rgba(34,211,153,.15)':'rgba(82,96,112,.15)'};color:${k.uloga==='admin'?'var(--green)':'var(--muted)'};padding:2px 8px;border-radius:4px;font-size:11px">${k.uloga}</span></td>
-        <td style="padding:9px 12px;color:var(--muted)">${k.zadnja_prijava?k.zadnja_prijava.slice(0,16):'Nikad'}</td>
-        <td style="padding:9px 12px"><button onclick="deleteKorisnik('${k.username}')" style="background:none;border:none;color:var(--grid-out);cursor:pointer">✕</button></td>
+        <td style="padding:9px 12px">${esc(k.username)}</td>
+        <td style="padding:9px 12px"><span style="background:${k.uloga==='admin'?'rgba(34,211,153,.15)':'rgba(82,96,112,.15)'};color:${k.uloga==='admin'?'var(--green)':'var(--muted)'};padding:2px 8px;border-radius:4px;font-size:11px">${esc(k.uloga)}</span></td>
+        <td style="padding:9px 12px;color:var(--muted)">${esc(k.zadnja_prijava?k.zadnja_prijava.slice(0,16):'Nikad')}</td>
+        <td style="padding:9px 12px"><button data-username="${esc(k.username)}" style="background:none;border:none;color:var(--grid-out);cursor:pointer">✕</button></td>
       </tr>`;
     });
+    // Brisanje preko data-username + listenera (ne inline onclick s interpoliranom vrijednošću)
+    tb.querySelectorAll('button[data-username]').forEach(b=>b.addEventListener('click',()=>deleteKorisnik(b.dataset.username)));
   }catch(e){console.error(e);}
 }
 
@@ -1276,7 +1299,13 @@ async function addKorisnik(){
   const pass=document.getElementById('usr-pass').value;
   const role=document.getElementById('usr-role').value;
   if(!name||!pass){showToast('Unesite korisnika i lozinku!');return;}
-  await fetch('/api/postavke/korisnici',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:name,password:pass,uloga:role})});
+  // Server vraća {ok:false,error} (npr. degradiranje zadnjeg admina) — ne javljaj uspjeh naslijepo
+  let d=null;
+  try{
+    const r=await fetch('/api/postavke/korisnici',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:name,password:pass,uloga:role})});
+    d=await r.json();
+  }catch(e){console.error(e);}
+  if(!d||!d.ok){showToast('✗ '+(d?.error||'Korisnik nije spremljen'));return;}
   document.getElementById('usr-name').value='';
   document.getElementById('usr-pass').value='';
   showToast('Korisnik dodan!');
@@ -1285,7 +1314,12 @@ async function addKorisnik(){
 
 async function deleteKorisnik(name){
   if(!confirm('Obrisati korisnika '+name+'?'))return;
-  await fetch('/api/postavke/korisnici?username='+name,{method:'DELETE'});
+  let d=null;
+  try{
+    const r=await fetch('/api/postavke/korisnici?username='+name,{method:'DELETE'});
+    d=await r.json();
+  }catch(e){console.error(e);}
+  if(!d||!d.ok) showToast('✗ '+(d?.error||'Korisnik nije obrisan'));
   loadKorisnici();
 }
 async function autoBackup(){
@@ -1338,17 +1372,17 @@ async function loadHepStanje() {
     const d = await r.json();
     if (!d.has_data) {
       box.innerHTML = `<em>Nema unesenog HEP računa — uploadaj PDF u sekciji "Dodaj stvarni HEP račun".</em>
-        <div style="margin-top:8px">Mjesečna pretplata po default tarifima: <strong style="color:var(--text)">${d.mjesecna_pretplata} €</strong>
-        (opskrbna ${d.pretplata_opskrba} € + mjerna ${d.pretplata_mjerna} €).</div>`;
+        <div style="margin-top:8px">Mjesečna pretplata po default tarifima: <strong style="color:var(--text)">${esc(d.mjesecna_pretplata)} €</strong>
+        (opskrbna ${esc(d.pretplata_opskrba)} € + mjerna ${esc(d.pretplata_mjerna)} €).</div>`;
       return;
     }
     const dugColor = d.dug > 0 ? '#f87171' : '#22c55e';
-    const danasISO = new Date().toISOString().slice(0,10);
+    const danasISO = localDate();
     const overdueDays = d.datum_dospijeca && d.datum_dospijeca < danasISO
       ? Math.floor((new Date(danasISO) - new Date(d.datum_dospijeca)) / 86400000)
       : null;
     const dospijece_html = d.datum_dospijeca
-      ? `<strong style="color:${overdueDays > 0 ? '#f87171' : 'var(--text)'}">${d.datum_dospijeca}</strong>`
+      ? `<strong style="color:${overdueDays > 0 ? '#f87171' : 'var(--text)'}">${esc(d.datum_dospijeca)}</strong>`
         + (overdueDays > 0 ? ` <span style="color:#f87171">(zakasnilo ${overdueDays} d)</span>` : '')
       : '—';
     box.innerHTML = `
@@ -1356,7 +1390,7 @@ async function loadHepStanje() {
         <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px">
           <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Zadnji račun</div>
           <div style="font-size:22px;color:var(--text);font-family:var(--mono);margin-top:4px">${(d.iznos||0).toFixed(2)} €</div>
-          <div style="font-size:11px;color:var(--muted);margin-top:2px">period ${d.period||'—'} · ${d.datum_racuna||'—'}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">period ${esc(d.period||'—')} · ${esc(d.datum_racuna||'—')}</div>
         </div>
         <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px">
           <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Nepodmireni dug</div>
@@ -1375,12 +1409,12 @@ async function loadHepStanje() {
         </div>
       </div>
       <div style="font-size:12px;color:var(--muted);font-family:var(--mono)">
-        ${d.model_tarife ? '⚡ '+d.model_tarife+' · ' : ''}
-        ${d.broj_racuna ? 'br. '+d.broj_racuna+' · ' : ''}
-        ${d.sifra_kupca ? 'šifra kupca '+d.sifra_kupca : ''}
+        ${d.model_tarife ? '⚡ '+esc(d.model_tarife)+' · ' : ''}
+        ${d.broj_racuna ? 'br. '+esc(d.broj_racuna)+' · ' : ''}
+        ${d.sifra_kupca ? 'šifra kupca '+esc(d.sifra_kupca) : ''}
       </div>`;
   } catch(e) {
-    box.innerHTML = '<em style="color:#f87171">Greška: '+e+'</em>';
+    box.innerHTML = '<em style="color:#f87171">Greška: '+esc(e)+'</em>';
   }
 }
 
@@ -1424,7 +1458,7 @@ async function loadProcjenaTrenutni() {
     }
 
     box.innerHTML = `
-      <div style="font-size:11px;color:var(--muted);margin-bottom:10px;font-family:var(--mono)">${d.model}</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px;font-family:var(--mono)">${esc(d.model)}</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:10px">
         <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px">
           <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Proteklo (${d.dani_s_podacima}/${d.n_dana_mjesec} dana)</div>
@@ -1449,11 +1483,11 @@ async function loadProcjenaTrenutni() {
       </div>
       ${bijeli_html}
       <div style="font-size:12px;color:var(--muted);margin-top:10px">
-        Procjena vrijedi za <strong>${d.mjesec}</strong>, ${d.postotak_mjeseca}% mjeseca odrađeno.
+        Procjena vrijedi za <strong>${esc(d.mjesec)}</strong>, ${esc(d.postotak_mjeseca)}% mjeseca odrađeno.
         Tarife: VT ${(d.tarifa.vt_kwh*100).toFixed(2)} c/kWh · NT ${(d.tarifa.nt_kwh*100).toFixed(2)} c/kWh · VT otkup ${(d.tarifa.vt_otkup*100).toFixed(2)} c/kWh · PDV ${(d.tarifa.pdv*100).toFixed(0)}%.
       </div>`;
   } catch(e) {
-    box.innerHTML = '<em style="color:#f87171">Greška: '+e+'</em>';
+    box.innerHTML = '<em style="color:#f87171">Greška: '+esc(e)+'</em>';
   }
 }
 
@@ -1658,7 +1692,11 @@ async function loadPowerLimit() {
     if (d.note) { info.textContent = d.note; return; }
     if (!d.series || !d.series.length) { info.textContent = 'Nema podataka za 24h.'; return; }
 
-    const labels = d.series.map(s => s.ts.slice(11,16));
+    // HA last_changed je UTC (+00:00) — labela iz trenutka u lokalnom vremenu, ne rezanjem stringa
+    const labels = d.series.map(s => {
+      const t = s.ts ? new Date(s.ts) : new Date(NaN);
+      return isNaN(t) ? String(s.ts||'').slice(11,16) : t.toLocaleTimeString('hr-HR',{hour:'2-digit',minute:'2-digit'});
+    });
     const data   = d.series.map(s => s.w / 1000);  // W → kW
     if (_powLimitChart) _powLimitChart.destroy();
     _powLimitChart = new Chart(document.getElementById('cPowLimit'), {
@@ -1740,19 +1778,19 @@ async function loadOmmInfo() {
         : '<span style="color:#fbbf24">Proizvođač</span>';
       html += `
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px">
-        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Kupac</div><div style="font-family:var(--mono);color:var(--text)">${m.naziv||'—'}</div></div>
-        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Šifra OMM</div><div style="font-family:var(--mono);color:var(--text)">${m.id}</div></div>
-        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">OIB</div><div style="font-family:var(--mono)">${m.oib||'—'}</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Kupac</div><div style="font-family:var(--mono);color:var(--text)">${esc(m.naziv||'—')}</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Šifra OMM</div><div style="font-family:var(--mono);color:var(--text)">${esc(m.id)}</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">OIB</div><div style="font-family:var(--mono)">${esc(m.oib||'—')}</div></div>
         <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Tip</div><div>${tipBadge}</div></div>
-        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Adresa</div><div style="font-size:12px">${m.adresa||'—'}</div></div>
-        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Raspon očitanja</div><div style="font-family:var(--mono);font-size:12px">${(m.prvi_zapis||'').slice(0,10)} → ${(m.zadnji_zapis||'').slice(0,10)}</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Adresa</div><div style="font-size:12px">${esc(m.adresa||'—')}</div></div>
+        <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Raspon očitanja</div><div style="font-family:var(--mono);font-size:12px">${esc((m.prvi_zapis||'').slice(0,10))} → ${esc((m.zadnji_zapis||'').slice(0,10))}</div></div>
         <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">15-min zapisa</div><div style="font-family:var(--mono)">${(m.n_15min||0).toLocaleString()}</div></div>
         <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Ukupna potrošnja</div><div style="font-family:var(--mono);color:#22d3ee">${(m.uk_potrosnja||0).toLocaleString()} kWh</div></div>
         <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Ukupna predaja</div><div style="font-family:var(--mono);color:#fbbf24">${(m.uk_predaja||0).toLocaleString()} kWh</div></div>
       </div>`;
     }
     box.innerHTML = html;
-  } catch(e) { box.innerHTML = '<em style="color:#f87171">Greška: '+e+'</em>'; }
+  } catch(e) { box.innerHTML = '<em style="color:#f87171">Greška: '+esc(e)+'</em>'; }
 }
 
 let _vtntChart = null;
@@ -1786,7 +1824,7 @@ async function loadVtNtTrosak() {
     const tbody = document.getElementById('tVtNt');
     tbody.innerHTML = (d.mjeseci || []).map(m => `
       <tr>
-        <td style="font-family:var(--mono)">${m.mjesec}</td>
+        <td style="font-family:var(--mono)">${esc(m.mjesec)}</td>
         <td style="text-align:right;font-family:var(--mono)">${m.vt_kwh}</td>
         <td style="text-align:right;font-family:var(--mono)">${m.nt_kwh}</td>
         <td style="text-align:right;font-family:var(--mono)">${m.vt_perc ?? '—'}%</td>

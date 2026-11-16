@@ -6,7 +6,7 @@ import os
 
 from flask import Blueprint, jsonify, redirect, request, session
 
-from .core import hash_password, limiter, needs_rehash, verify_password
+from .core import hash_password, limiter, needs_rehash, start_session, verify_password
 from .db import get_db
 
 log = logging.getLogger(__name__)
@@ -92,11 +92,9 @@ def get_login_page(error: bool = False) -> str:
 
 
 def _do_login(username: str, pw: str) -> bool:
-    if LOGIN_PASSWORD and hmac.compare_digest(pw, LOGIN_PASSWORD):
-        session['logged_in'] = True
-        session['username']  = username or 'admin'
-        session['uloga']     = 'admin'
-        session.permanent    = True
+    # bytes: compare_digest na str s ne-ASCII znakovima (š/đ/č) baca TypeError => 500
+    if LOGIN_PASSWORD and hmac.compare_digest(pw.encode('utf-8'), LOGIN_PASSWORD.encode('utf-8')):
+        start_session(session, username or 'admin', 'admin', LOGIN_PASSWORD, src='env')
         return True
     try:
         conn = get_db()
@@ -106,21 +104,22 @@ def _do_login(username: str, pw: str) -> bool:
         ).fetchone()
         conn.close()
         if user and verify_password(pw, user['password_hash']):
-            session['logged_in'] = True
-            session['username']  = user['username']
-            session['uloga']     = user['uloga']
-            session.permanent    = True
-            if needs_rehash(user['password_hash']):
+            pw_hash = user['password_hash']
+            if needs_rehash(pw_hash):
                 try:
+                    novi = hash_password(pw)
                     c2 = get_db()
                     c2.execute(
                         'UPDATE korisnici SET password_hash=? WHERE id=?',
-                        (hash_password(pw), user['id']),
+                        (novi, user['id']),
                     )
                     c2.commit()
                     c2.close()
+                    pw_hash = novi
                 except Exception as e:
                     log.warning(f'rehash failed: {e}')
+            # otisak mora odgovarati hashu koji je stvarno u bazi (nakon rehasha)
+            start_session(session, user['username'], user['uloga'], pw_hash)
             try:
                 c2 = get_db()
                 c2.execute(
