@@ -1428,14 +1428,16 @@ async function loadProcjenaTrenutni() {
       box.innerHTML = '<em>Nema podataka iz HEP scrapera za tekući mjesec.</em>';
       return;
     }
-    const ukupno_proj = (d.racun_procjena + d.fiksne_naknade).toFixed(2);
+    // racun_procjena VEĆ uključuje fiksne naknade (opskrbna + mjerna), kao i pravi račun —
+    // ne pribrajati ih ponovno
+    const ukupno_proj = d.racun_procjena.toFixed(2);
 
     // HEPI bijeli specific
     let bijeli_html = '';
     if (d.bijeli_procjena) {
       const bp = d.bijeli_procjena;
       const op = d.otkup_procjena;
-      const neto = (bp.iznos + d.fiksne_naknade - (op?.ukupno_eur || 0)).toFixed(2);
+      const neto = (bp.iznos - (op?.ukupno_eur || 0)).toFixed(2);
       bijeli_html = `
       <div style="background:var(--bg);border:1px solid #22d3ee44;border-radius:8px;padding:14px;margin-top:10px">
         <div style="font-size:13px;color:#22d3ee;font-weight:600;margin-bottom:10px">⚡ HEPI bijeli — net-metering izračun</div>
@@ -1452,7 +1454,7 @@ async function loadProcjenaTrenutni() {
         </div>
         <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-size:13px">
           <strong>Neto za platiti: <span style="color:${neto>=0?'#f87171':'#22c55e'};font-family:var(--mono)">${neto} €</span></strong>
-          <span style="color:var(--muted);font-size:11px"> · račun ${bp.iznos} € + fiksno ${d.fiksne_naknade} €${op?.ukupno_eur ? ' − otkup '+op.ukupno_eur+' €' : ''}</span>
+          <span style="color:var(--muted);font-size:11px"> · račun ${bp.iznos} €${op?.ukupno_eur ? ' − otkup '+op.ukupno_eur+' €' : ''} · u računu je fiksno ${d.fiksne_naknade} € + PDV</span>
         </div>
       </div>`;
     }
@@ -1468,7 +1470,7 @@ async function loadProcjenaTrenutni() {
         <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px">
           <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Procjena cijeli mjesec</div>
           <div style="font-size:22px;color:#fbbf24;font-family:var(--mono);margin-top:4px">${ukupno_proj} €</div>
-          <div style="font-size:11px;color:var(--muted);margin-top:2px">+ fiksno ${d.fiksne_naknade.toFixed(2)} € pretplate</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">uključuje fiksno ${d.fiksne_naknade.toFixed(2)} € pretplate + PDV</div>
         </div>
         <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px">
           <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Projicirano kWh</div>
