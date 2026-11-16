@@ -3,7 +3,7 @@
 Import SMA povijesnih podataka - koristi Max aggregate
 Formula: Max_W * 0.25h / 1000 = kWh po 15-min intervalu
 """
-import requests, sqlite3, logging, os
+import requests, sqlite3, logging, os, sys
 from datetime import datetime, timedelta, timezone
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -23,7 +23,8 @@ def get_token():
     r.raise_for_status()
     return r.json()['access_token']
 
-def fetch_week(token, begin_str, end_str):
+def fetch_week(token, begin_str, end_str, strict=False):
+    # strict=True: HTTP greška baca iznimku (main), inače vraća prazno (maintenance.backfill_range)
     h = {'Authorization':f'Bearer {token}','Accept':'application/json','Content-Type':'application/json'}
     r = requests.post(f'{API_BASE}/measurements/search', headers=h, timeout=120, json={
         'dateTimeBegin': begin_str,
@@ -34,6 +35,8 @@ def fetch_week(token, begin_str, end_str):
         ]
     })
     if r.status_code != 200:
+        if strict:
+            raise RuntimeError(f'SMA API {r.status_code}')
         log.warning(f'API {r.status_code}')
         return {}, {}
     inv1, inv2 = {}, {}
@@ -48,16 +51,31 @@ def fetch_week(token, begin_str, end_str):
     return inv1, inv2
 
 def aggregate_daily(conn):
-    # W * 0.25h / 1000 = kWh po intervalu
+    # W * 0.25h / 1000 = kWh po intervalu (Max aggregate precjenjuje stvarnu energiju)
+    # ts je UTC ('...Z'), datum je LOKALNI dan -> date(ts,'localtime') (kontejner: TZ=Europe/Zagreb).
+    # Upsert samo PV kolona: INSERT OR REPLACE bi obrisao cijeli red, pa i
+    # feed_in/grid/total/autarky koje pišu drugi jobovi (ha_puller, maintenance).
+    # Dan sa samim nulama dobije red, ali nula ne gazi već upisanu pozitivnu PV vrijednost.
+    # Tekući lokalni dan: pv_generation_kwh se NE dira (samo inv1/inv2) — djelomični,
+    # precijenjeni zbroj bi blokirao ha_puller.pull_today, koji prima samo rastuće vrijednosti.
     conn.execute('''
-        INSERT OR REPLACE INTO sma_dnevna
+        INSERT INTO sma_dnevna
             (datum, pv_generation_kwh, pv_kwh_inv1, pv_kwh_inv2)
-        SELECT date(ts),
-            ROUND(SUM(pv_w_total) * 0.25 / 1000.0, 3),
-            ROUND(SUM(pv_w_inv1)  * 0.25 / 1000.0, 3),
-            ROUND(SUM(pv_w_inv2)  * 0.25 / 1000.0, 3)
-        FROM sma_15min WHERE pv_w_total > 0
-        GROUP BY date(ts)
+        SELECT date(ts, 'localtime'),
+            CASE WHEN date(ts, 'localtime') <> date('now', 'localtime')
+                 THEN ROUND(SUM(pv_w_total) * 0.25 / 1000.0, 3) END,
+            ROUND(SUM(COALESCE(pv_w_inv1, 0)) * 0.25 / 1000.0, 3),
+            ROUND(SUM(COALESCE(pv_w_inv2, 0)) * 0.25 / 1000.0, 3)
+        FROM sma_15min
+        WHERE pv_w_total IS NOT NULL AND date(ts, 'localtime') IS NOT NULL
+        GROUP BY date(ts, 'localtime')
+        ON CONFLICT(datum) DO UPDATE SET
+            pv_generation_kwh = COALESCE(excluded.pv_generation_kwh, sma_dnevna.pv_generation_kwh),
+            pv_kwh_inv1       = excluded.pv_kwh_inv1,
+            pv_kwh_inv2       = excluded.pv_kwh_inv2
+        WHERE excluded.pv_generation_kwh IS NULL
+           OR excluded.pv_generation_kwh > 0
+           OR COALESCE(sma_dnevna.pv_generation_kwh, 0) <= 0
     ''')
     conn.commit()
 
@@ -82,42 +100,50 @@ def main():
     token_ts = datetime.now()
     current  = start
     total    = 0
+    failed   = False
 
     while current < end:
-        if (datetime.now() - token_ts).seconds > 3000:
-            token = get_token()
-            token_ts = datetime.now()
-
         week_end = min(current + timedelta(days=7), end)
         b = current.strftime('%Y-%m-%dT%H:%M:%S.000Z')
         e = week_end.strftime('%Y-%m-%dT%H:%M:%S.000Z')
 
         try:
-            inv1, inv2 = fetch_week(token, b, e)
+            if (datetime.now() - token_ts).seconds > 3000:
+                token = get_token()
+                token_ts = datetime.now()
+
+            inv1, inv2 = fetch_week(token, b, e, strict=True)
             all_ts = set(inv1)|set(inv2)
             saved = 0
             for ts in all_ts:
                 w1, w2 = inv1.get(ts,0), inv2.get(ts,0)
-                try:
-                    conn.execute('INSERT OR REPLACE INTO sma_15min (ts,pv_w_inv1,pv_w_inv2,pv_w_total) VALUES (?,?,?,?)',
-                        (ts, w1, w2, w1+w2))
-                    saved += 1
-                except: pass
+                conn.execute('INSERT OR REPLACE INTO sma_15min (ts,pv_w_inv1,pv_w_inv2,pv_w_total) VALUES (?,?,?,?)',
+                    (ts, w1, w2, w1+w2))
+                saved += 1
             conn.commit()
             total += saved
             log.info(f'{current.date()} — {week_end.date()}: {saved} zapisa (ukupno {total})')
         except Exception as ex:
-            log.error(f'Greška {current.date()}: {ex}')
+            # Ne idi dalje: kasniji tjedni bi pomaknuli MAX(ts) preko ovog i ostavili
+            # trajnu rupu. Sljedeće pokretanje nastavlja od iste točke.
+            conn.rollback()
+            log.error(f'Greška {current.date()} — {week_end.date()}: {ex} — prekidam, sljedeći run ponavlja od {current.date()}')
+            failed = True
+            break
 
         current = week_end
 
-    log.info(f'Import gotov! Ukupno {total} zapisa')
+    if failed:
+        log.error(f'Import prekinut! Spremljeno {total} zapisa prije greške')
+    else:
+        log.info(f'Import gotov! Ukupno {total} zapisa')
     aggregate_daily(conn)
 
     count = conn.execute('SELECT COUNT(*) FROM sma_dnevna WHERE pv_generation_kwh>0').fetchone()[0]
     ukup  = conn.execute('SELECT SUM(pv_generation_kwh) FROM sma_dnevna').fetchone()[0] or 0
     log.info(f'Rezultat: {count} dana, {ukup:.1f} kWh ukupno')
     conn.close()
+    return 1 if failed else 0
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

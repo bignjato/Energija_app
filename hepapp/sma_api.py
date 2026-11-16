@@ -28,11 +28,49 @@ Endpointi koje koristimo:
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 import requests
 
 log = logging.getLogger(__name__)
+
+
+def sma_live_ts(val=None, naive_tz=timezone.utc) -> str:
+    """Normaliziraj vrijeme za sma_live.ts: UTC s offsetom, 'YYYY-MM-DDTHH:MM:SS+00:00'.
+
+    val s offsetom/'Z' se preračuna u UTC; naivni val se tumači u naive_tz.
+    Bez val-a (ili ako se ne da parsirati) -> trenutak sada.
+    """
+    dt = None
+    if val:
+        try:
+            dt = datetime.fromisoformat(str(val).strip().replace('Z', '+00:00'))
+        except ValueError:
+            log.warning('SMA: neparsabilno vrijeme %r — koristim sada', val)
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    elif dt.tzinfo is None:
+        dt = dt.replace(tzinfo=naive_tz)
+    return dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+
+
+def sma_15min_ts(val, naive_tz=timezone.utc) -> Optional[str]:
+    """Normaliziraj vrijeme za sma_15min.ts: UTC sa 'Z', 'YYYY-MM-DDTHH:MM:SSZ'.
+
+    Kao sma_live_ts, ali bez "sada" fallbacka — povijesni uzorak s neparsabilnim
+    vremenom se ne smije spremiti pod trenutnim vremenom (-> None, preskoči ga).
+    """
+    if not val:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(val).strip().replace('Z', '+00:00'))
+    except ValueError:
+        log.warning('SMA: neparsabilno vrijeme %r — preskačem uzorak', val)
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=naive_tz)
+    return dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
 class SmaApiClient:

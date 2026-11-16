@@ -10,6 +10,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 try:
     import requests
@@ -26,6 +27,14 @@ LOG_PATH    = Path(__file__).parent / "ha_sender.log"
 
 # Ime senzora u Home Assistantu (prilagodite po potrebi)
 SENSOR_PREFIX = "sensor.hep_ods"
+
+# HEP dnevni podaci su po lokalnom kalendarskom danu
+LOCAL_TZ = ZoneInfo("Europe/Zagreb")
+
+
+def _lokalna_ponoc_iso(datum: str) -> str:
+    """'YYYY-MM-DD' -> ISO 8601 lokalne ponoći s ispravnim offsetom (+01:00 zimi, +02:00 ljeti)."""
+    return datetime.strptime(datum[:10], "%Y-%m-%d").replace(tzinfo=LOCAL_TZ).isoformat()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -270,7 +279,7 @@ def posalji_statistike(ha: HomeAssistantAPI, conn: sqlite3.Connection, dani: int
         for d in dnevni:
             cumsum += (d.get("kwh_plus") or 0)
             stat_rows.append({
-                "start": f"{d['datum']}T00:00:00+01:00",
+                "start": _lokalna_ponoc_iso(d["datum"]),
                 "sum":   round(cumsum, 4),
                 "state": round(d.get("kwh_plus") or 0, 4),
             })

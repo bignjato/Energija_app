@@ -25,8 +25,9 @@ import sqlite3
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-from hepapp.sma_api import SmaApiClient
+from hepapp.sma_api import SmaApiClient, sma_live_ts, sma_15min_ts
 
 DB_PATH = os.environ.get('DB_PATH', '/data/hep_energy.db')
 
@@ -69,7 +70,9 @@ def _save_recent(conn, plant_id: str, api: SmaApiClient):
         log.warning('Recent: prazno')
         return 0
     last = series[-1]
-    ts = last.get('time') or datetime.now().isoformat(timespec='seconds')
+    # sma_live.ts je UTC s offsetom. Monitoring API vraća 'time' bez offseta,
+    # u lokalnom vremenu elektrane -> Europe/Zagreb -> UTC.
+    ts = sma_live_ts(last.get('time'), naive_tz=ZoneInfo('Europe/Zagreb'))
     conn.execute('''
         INSERT INTO sma_live (ts, pv_generation_w, feed_in_w, external_consumption_w,
                               total_consumption_w, direct_consumption_w,
@@ -97,10 +100,11 @@ def _save_day(conn, plant_id: str, datum: str, api: SmaApiClient):
     total  = j.get('total') or {}
     log.info('Day %s: %d intervala (rezolucija %s)', datum, len(series), j.get('resolution'))
 
-    # 5-min set
+    # 5-min set. sma_15min.ts je UTC sa 'Z' (svi čitači to pretpostavljaju), a API
+    # vraća naivno lokalno vrijeme elektrane -> Europe/Zagreb -> UTC (kao u _save_recent).
     n = 0
     for s in series:
-        ts = s.get('time')
+        ts = sma_15min_ts(s.get('time'), naive_tz=ZoneInfo('Europe/Zagreb'))
         if not ts:
             continue
         conn.execute('''

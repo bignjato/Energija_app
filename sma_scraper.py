@@ -32,6 +32,7 @@ DB_PATH = os.environ.get('DB_PATH', '/data/hep_energy.db')
 
 
 from netutil import retry_session
+from hepapp.sma_api import sma_live_ts
 
 SESSION = retry_session()
 
@@ -136,7 +137,8 @@ def fetch_live(token, conn):
         log.error('Nije moguće dohvatiti live podatke')
         return None
 
-    ts = data.get('time', datetime.now().isoformat())
+    # sma_live.ts je UTC s offsetom; naivni 'time' se tumači kao UTC (kao i ostatak uiapi-ja)
+    ts = sma_live_ts(data.get('time'))
     row = (
         ts,
         data.get('pvGeneration'),
@@ -223,11 +225,13 @@ def fetch_historical_15min(token, conn, datum_od=None, datum_do=None):
 def aggregate_sma_daily(conn):
     """Agregiraj dnevne SMA podatke iz live tablice"""
     # Agregiraj iz live zapisa (svakih 5-15 min)
+    # Upsert (ne INSERT OR REPLACE) da ostale kolone reda (pv_kwh_inv1/inv2...) prežive.
+    # ts je UTC, datum je LOKALNI dan.
     conn.execute('''
-        INSERT OR REPLACE INTO sma_dnevna (datum, pv_generation_kwh, feed_in_kwh, 
+        INSERT INTO sma_dnevna (datum, pv_generation_kwh, feed_in_kwh, 
             grid_consumption_kwh, total_consumption_kwh, self_consumption_kwh, autarky_rate)
         SELECT 
-            date(ts) as datum,
+            date(ts, 'localtime') as datum,
             -- W * interval_sati = Wh, dijeli s 1000 za kWh
             -- Live zapisi su svakih ~5 min = 1/12 sata
             ROUND(SUM(COALESCE(pv_generation_w, 0)) / 12.0 / 1000.0, 3) as pv_kwh,
@@ -237,8 +241,15 @@ def aggregate_sma_daily(conn):
             ROUND(SUM(COALESCE(direct_consumption_w, 0)) / 12.0 / 1000.0, 3) as self_kwh,
             AVG(COALESCE(autarky_rate, 0)) as autarky
         FROM sma_live
-        WHERE date(ts) < date('now')
-        GROUP BY date(ts)
+        WHERE date(ts, 'localtime') < date('now', 'localtime')
+        GROUP BY date(ts, 'localtime')
+        ON CONFLICT(datum) DO UPDATE SET
+            pv_generation_kwh     = excluded.pv_generation_kwh,
+            feed_in_kwh           = excluded.feed_in_kwh,
+            grid_consumption_kwh  = excluded.grid_consumption_kwh,
+            total_consumption_kwh = excluded.total_consumption_kwh,
+            self_consumption_kwh  = excluded.self_consumption_kwh,
+            autarky_rate          = excluded.autarky_rate
     ''')
     conn.commit()
     log.info('SMA dnevna agregacija završena')

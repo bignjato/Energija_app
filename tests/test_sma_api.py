@@ -86,3 +86,60 @@ def test_get_trajni_fail_baca(monkeypatch):
                         lambda *a, **k: FakeResp(500, text='server error'))
     with pytest.raises(RuntimeError):
         c._get('/v1/plants')
+
+
+# ---- sma_live_ts: format sma_live.ts (UTC s eksplicitnim offsetom) ----
+
+def test_sma_live_ts_format_i_konverzija():
+    import re
+    from zoneinfo import ZoneInfo
+    from hepapp.sma_api import sma_live_ts
+
+    zg = ZoneInfo('Europe/Zagreb')
+    assert sma_live_ts('2026-11-15T22:48:35Z') == '2026-11-15T22:48:35+00:00'
+    assert sma_live_ts('2026-07-10T12:00:00.123+02:00') == '2026-07-10T10:00:00+00:00'
+    # naivno: default UTC; uz naive_tz lokalno -> UTC (ljeto +2, zima +1)
+    assert sma_live_ts('2026-07-10T12:00:00') == '2026-07-10T12:00:00+00:00'
+    assert sma_live_ts('2026-07-10T12:00:00', naive_tz=zg) == '2026-07-10T10:00:00+00:00'
+    assert sma_live_ts('2026-01-10T12:00:00', naive_tz=zg) == '2026-01-10T11:00:00+00:00'
+    # bez vrijednosti / smeće -> sada, u istom formatu
+    for v in (None, '', 'nije-datum'):
+        assert re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00', sma_live_ts(v))
+
+
+# ---- sma_15min_ts + sma_api_scraper._save_day: sma_15min.ts je UTC sa 'Z' ----
+
+def test_sma_15min_ts_format_i_konverzija():
+    from zoneinfo import ZoneInfo
+    from hepapp.sma_api import sma_15min_ts
+
+    zg = ZoneInfo('Europe/Zagreb')
+    assert sma_15min_ts('2026-07-15T12:00:00', naive_tz=zg) == '2026-07-15T10:00:00Z'
+    assert sma_15min_ts('2026-01-15T12:00:00', naive_tz=zg) == '2026-01-15T11:00:00Z'
+    assert sma_15min_ts('2026-07-15T12:00:00+02:00', naive_tz=zg) == '2026-07-15T10:00:00Z'
+    assert sma_15min_ts('2026-07-15T10:00:00Z') == '2026-07-15T10:00:00Z'
+    # povijesni uzorak bez valjanog vremena se preskače (nema "sada" fallbacka)
+    for v in (None, '', 'nije-datum'):
+        assert sma_15min_ts(v) is None
+
+
+def test_save_day_sprema_utc_z(tmp_path):
+    import sqlite3
+    import sma_api_scraper as sas
+
+    class Api:
+        def energy_balance_day(self, plant_id, datum):
+            return {'resolution': 'FiveMinutes', 'set': [
+                {'time': '2026-07-15T00:05:00', 'pvGeneration': 0},      # lokalno 00:05 = 14.7. 22:05Z
+                {'time': '2026-07-15T12:00:00', 'pvGeneration': 3000},
+                {'time': None, 'pvGeneration': 1},
+                {'time': 'smeće', 'pvGeneration': 1},
+            ]}
+
+    conn = sqlite3.connect(tmp_path / 'api.db')
+    sas._ensure_schema(conn)
+    assert sas._save_day(conn, 'P1', '2026-07-15', Api()) == 2
+    assert sas._save_day(conn, 'P1', '2026-07-15', Api()) == 2   # upsert, bez duplikata
+    rows = conn.execute('SELECT ts, pv_w_total FROM sma_15min ORDER BY ts').fetchall()
+    assert rows == [('2026-07-14T22:05:00Z', 0), ('2026-07-15T10:00:00Z', 3000)]
+    conn.close()
