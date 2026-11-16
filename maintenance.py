@@ -14,8 +14,9 @@ Pokretanje:
   python /app/maintenance.py --restore-drill
   python /app/maintenance.py --check-offsite
   python /app/maintenance.py --check-token-age
+  python /app/maintenance.py --check-inverter
 """
-import os, sqlite3, logging, argparse, sys
+import os, sqlite3, logging, argparse, sys, json, time
 from datetime import datetime, timedelta, timezone
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -25,9 +26,31 @@ DB_PATH = os.environ.get('DB_PATH', '/data/hep_energy.db')
 
 
 def _conn():
-    c = sqlite3.connect(DB_PATH)
+    # timeout=30: web/sync kontejner dijele bazu — cekaj lock umjesto "database is locked"
+    c = sqlite3.connect(DB_PATH, timeout=30)
     c.row_factory = sqlite3.Row
     return c
+
+
+def _lokalna_zona():
+    """Europe/Zagreb; ako tzdata fali, sistemska zona (kontejneri imaju TZ=Europe/Zagreb)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo('Europe/Zagreb')
+    except Exception:
+        return None
+
+
+def _u_lokalno(dt):
+    """UTC/aware datetime -> lokalno (Zagreb) vrijeme. Naivni ts tretiraj kao UTC."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_lokalna_zona())
+
+
+def _now_ts():
+    """Epoch sekunde (izdvojeno radi testova)."""
+    return time.time()
 
 
 # ---------- 1. Backfill sma_dnevna flow-metrika iz sma_live ----------
@@ -36,6 +59,9 @@ def backfill_daily(conn):
 
     Integracija: trapezno po danu (W × dt). Samo dani gdje sma_dnevna jos
     nema flow podatke (feed_in_kwh IS NULL). PV ostaje iz sma_15min importa.
+    sma_live.ts je UTC, a sma_dnevna.datum LOKALNI dan — uzorci se grupiraju po
+    lokalnom (Zagreb) danu. Danasnji dan se preskace: integracija nepotpunog
+    dana bi (zbog COALESCE) zamrznula djelomican zbroj; danasnji red puni HA puller.
     """
     rows = conn.execute('''
         SELECT ts, pv_generation_w, feed_in_w, external_consumption_w,
@@ -56,11 +82,17 @@ def backfill_daily(conn):
             dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
         except Exception:
             continue
-        po_danu.setdefault(dt.date().isoformat(), []).append((dt, r))
+        if dt.tzinfo is None:              # stari zapisi bez offseta su UTC
+            dt = dt.replace(tzinfo=timezone.utc)
+        po_danu.setdefault(_u_lokalno(dt).date().isoformat(), []).append((dt, r))
 
-    # koje dane treba (sma_dnevna.feed_in_kwh IS NULL ili red ne postoji)
+    # koje dane treba (sma_dnevna.feed_in_kwh IS NULL ili red ne postoji);
+    # samo zavrseni lokalni dani
+    danas = _u_lokalno(datetime.now(timezone.utc)).date().isoformat()
     treba = set()
     for d in po_danu:
+        if d >= danas:
+            continue
         row = conn.execute('SELECT feed_in_kwh FROM sma_dnevna WHERE datum=?', (d,)).fetchone()
         if row is None or row['feed_in_kwh'] is None:
             treba.add(d)
@@ -132,7 +164,9 @@ def normalize_ts(conn):
 def prune_live(conn, keep_days=30):
     """Brisi sma_live starije od keep_days (5-min uzorci, samo za 'danas' view)."""
     prije = conn.execute('SELECT COUNT(*) c FROM sma_live').fetchone()['c']
-    conn.execute("DELETE FROM sma_live WHERE ts < datetime('now', ?)", (f'-{keep_days} days',))
+    # ts je 'YYYY-MM-DDTHH:MM:SS+00:00' (UTC) — granica u istom obliku ('T', ne razmak)
+    conn.execute("DELETE FROM sma_live WHERE ts < strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)",
+                 (f'-{keep_days} days',))
     conn.commit()
     poslije = conn.execute('SELECT COUNT(*) c FROM sma_live').fetchone()['c']
     log.info('prune_live: obrisano %d zapisa (zadrzano %d, %d dana)', prije - poslije, poslije, keep_days)
@@ -164,17 +198,29 @@ def backfill_range(conn, od, do):
             total += 1
         conn.commit()
         cur = we
-    # agregiraj te dane u sma_dnevna (PV)
-    conn.execute('''
-        INSERT OR REPLACE INTO sma_dnevna (datum, pv_generation_kwh, pv_kwh_inv1, pv_kwh_inv2)
-        SELECT date(ts), ROUND(SUM(pv_w_total)*0.25/1000.0,3),
-               ROUND(SUM(pv_w_inv1)*0.25/1000.0,3), ROUND(SUM(pv_w_inv2)*0.25/1000.0,3)
-        FROM sma_15min WHERE pv_w_total > 0 AND date(ts) BETWEEN ? AND ?
-        GROUP BY date(ts)
-    ''', (od, do))
+    _agregiraj_pv_dnevno(conn, od, do)
     conn.commit()
     log.info('backfill_range %s..%s: %d 15-min zapisa', od, do, total)
     return total
+
+
+def _agregiraj_pv_dnevno(conn, od, do):
+    """sma_15min (UTC 'Z') -> sma_dnevna PV stupci za lokalne dane od..do.
+
+    Upsert dira SAMO PV stupce — INSERT OR REPLACE bi obrisao feed_in/grid/
+    total_consumption/autarky postojecih redaka.
+    """
+    conn.execute('''
+        INSERT INTO sma_dnevna (datum, pv_generation_kwh, pv_kwh_inv1, pv_kwh_inv2)
+        SELECT date(ts,'localtime'), ROUND(SUM(pv_w_total)*0.25/1000.0,3),
+               ROUND(SUM(pv_w_inv1)*0.25/1000.0,3), ROUND(SUM(pv_w_inv2)*0.25/1000.0,3)
+        FROM sma_15min WHERE pv_w_total > 0 AND date(ts,'localtime') BETWEEN ? AND ?
+        GROUP BY date(ts,'localtime')
+        ON CONFLICT(datum) DO UPDATE SET
+            pv_generation_kwh = excluded.pv_generation_kwh,
+            pv_kwh_inv1       = excluded.pv_kwh_inv1,
+            pv_kwh_inv2       = excluded.pv_kwh_inv2
+    ''', (od, do))
 
 
 # ---------- HA notifikacije ----------
@@ -196,14 +242,29 @@ def _ha_send(title, message):
         log.info('_ha_send: %s -> %s', notify, r.status_code)
         return r.ok
     except Exception as e:
-        log.warning('_ha_send greska: %s', e)
+        # samo tip iznimke — tekst requests iznimke sadrzi URL
+        log.warning('_ha_send greska: %s', type(e).__name__)
         return False
+
+
+_TG_MD_ZNAKOVI = '_*`['
+
+
+def _tg_escape(tekst):
+    """Escape znakova koje Telegramov (legacy) Markdown tumaci kao pocetak
+    entiteta. Neuparen '_' (npr. ime tablice ili backup datoteke u poruci)
+    inace daje HTTP 400 "can't parse entities" i poruka nikad ne stigne.
+    """
+    return ''.join('\\' + ch if ch in _TG_MD_ZNAKOVI else ch for ch in str(tekst))
 
 
 def _tg_send(title, message):
     """Posalji Telegram poruku (neovisno o HA). Vraca True ako je poslana.
 
     Kredencijali iz env-a: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
+    Poruka se escapea za Markdown; ako Telegram ipak odbije formatiranje
+    (HTTP 400), salje se jos jednom kao obican tekst — alert je vazniji od
+    podebljanog naslova.
     """
     import requests
     tok  = os.environ.get('TELEGRAM_BOT_TOKEN', '').strip()
@@ -211,19 +272,33 @@ def _tg_send(title, message):
     if not tok or not chat:
         log.info('_tg_send: TELEGRAM_BOT_TOKEN/CHAT_ID nisu postavljeni — preskacem')
         return False
-    text = f'\u26a1 *{title}*\n{message}'
+    # unutar *...* escape ne vrijedi -> iz naslova se Markdown znakovi izbacuju
+    naslov = ''.join(ch for ch in str(title) if ch not in _TG_MD_ZNAKOVI)
+    pokusaji = [
+        {'text': f'\u26a1 *{naslov}*\n{_tg_escape(message)}', 'parse_mode': 'Markdown'},
+        {'text': f'\u26a1 {title}\n{message}'},        # fallback: obican tekst
+    ]
     try:
-        r = requests.post(f'https://api.telegram.org/bot{tok}/sendMessage',
-                          json={'chat_id': chat, 'text': text,
-                                'parse_mode': 'Markdown',
-                                'disable_web_page_preview': True},
-                          timeout=15)
-        log.info('_tg_send: -> %s', r.status_code)
-        if not r.ok:
+        for i, p in enumerate(pokusaji):
+            r = requests.post(f'https://api.telegram.org/bot{tok}/sendMessage',
+                              json={'chat_id': chat, 'disable_web_page_preview': True, **p},
+                              timeout=15)
+            log.info('_tg_send: -> %s', r.status_code)
+            if r.ok:
+                return True
             log.warning('_tg_send body: %s', r.text[:150])
-        return r.ok
+            if r.status_code != 400 or i == len(pokusaji) - 1:
+                return False
+            log.warning('_tg_send: Markdown odbijen — ponavljam kao obican tekst')
+        return False
     except Exception as e:
-        log.warning('_tg_send greska: %s', e)
+        # NIKAD ne logiraj samu iznimku: njen tekst sadrzi URL s bot tokenom
+        resp = getattr(e, 'response', None)
+        status = getattr(resp, 'status_code', None)
+        if status is not None:
+            log.warning('_tg_send greska: %s (HTTP %s)', type(e).__name__, status)
+        else:
+            log.warning('_tg_send greska: %s', type(e).__name__)
         return False
 
 
@@ -258,33 +333,151 @@ def _set_cfg(conn, key, value):
 
 
 # ---------- 2. Alert na stale sync (preko HA) ----------
-def check_freshness(conn, max_hep_h=48, max_sma_h=12):
-    """Posalji HA notifikaciju ako HEP/SMA podaci kasne."""
-    problemi = []
-    hep = conn.execute('SELECT MAX(datum) d FROM ocitanja_dnevna').fetchone()['d']
-    if hep:
-        zaost = (datetime.now().date() - datetime.fromisoformat(hep).date()).days
-        if zaost >= 2:
-            problemi.append(f'HEP podaci kasne {zaost} dana (zadnji {hep})')
-    sma = conn.execute("SELECT MAX(ts) t FROM sma_live").fetchone()['t']
-    if sma:
+FRESHNESS_STATE_KEY = '_freshness_state'
+FRESHNESS_RENOTIFY_S = 24 * 3600
+
+
+def _hep_zadnji_uzorak(conn):
+    """Lokalni ts ('YYYY-MM-DDTHH:MM:SS') kraja zadnjeg HEP intervala sa
+    stvarnim podacima, ili None ako podataka nema.
+
+    Nula-uzorci (0 kWh u oba smjera) su HEP-ova popuna za jos neisporuceno
+    razdoblje pa se ne broje. Ako ocitanja_15min nema nista, uzima se kraj
+    zadnjeg dana iz ocitanja_dnevna (dan D zavrsava uzorkom D+1 00:00:00).
+    """
+    def _max(sql):
+        try:
+            return conn.execute(sql).fetchone()[0]
+        except sqlite3.OperationalError as e:
+            if 'no such table' not in str(e):
+                raise
+            return None
+
+    ts = _max('SELECT MAX(ts) FROM ocitanja_15min WHERE kwh_plus > 0 OR kwh_minus > 0')
+    if ts:
+        return ts
+    dan = _max('SELECT MAX(datum) FROM ocitanja_dnevna')
+    if not dan:
+        return None
+    try:
+        return (datetime.fromisoformat(dan[:10]) + timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%S')
+    except ValueError:
+        return dan      # necitljivo -> javi pozivatelj
+
+
+def _freshness_problemi(conn, max_hep_h, max_sma_h, max_sync_h):
+    """Vrati {kljuc: opis} aktivnih problema ('hep', 'sma', 'sync')."""
+    problemi = {}
+
+    # (a) HEP: starost zadnjeg STVARNOG 15-min uzorka u satima. Kalendarska
+    # usporedba MAX(datum) s danasnjim danom nema marginu: HEP dan D isporucuje
+    # tek tijekom D+1, pa bi svake noci (od ponoci do isporuke) zadnji dan bio
+    # "2 dana iza" => lazni alert + "rijeseno" svako jutro.
+    zadnji = _hep_zadnji_uzorak(conn)
+    if zadnji is None:
+        problemi['hep'] = 'HEP podaci: nema nijednog ocitanja'
+    else:
+        try:
+            # ts je LOKALNO naivno vrijeme (kraj intervala) kao i datetime.now()
+            h = (datetime.now() - datetime.fromisoformat(zadnji[:19])).total_seconds() / 3600
+            if h >= max_hep_h:
+                problemi['hep'] = f'HEP podaci kasne {h:.0f} h (zadnji uzorak {zadnji})'
+        except ValueError:
+            problemi['hep'] = f'HEP podaci: necitljiv zadnji ts ({zadnji})'
+
+    # (b) SMA live: ts je UTC; zapis bez offseta tretiraj kao UTC (ne preskaci provjeru)
+    try:
+        sma = conn.execute('SELECT MAX(ts) t FROM sma_live').fetchone()['t']
+    except sqlite3.OperationalError as e:
+        if 'no such table' not in str(e):
+            raise
+        sma = None
+    if not sma:
+        problemi['sma'] = 'SMA live: nema nijednog uzorka'
+    else:
         try:
             dt = datetime.fromisoformat(sma.replace('Z', '+00:00'))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
             h = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
             if h >= max_sma_h:
-                problemi.append(f'SMA live kasni {h:.0f} h (zadnji {sma})')
-        except Exception:
-            pass
-    errs = conn.execute("SELECT COUNT(*) c FROM sync_log WHERE status='ERROR' AND ts >= datetime('now','-1 day')").fetchone()['c']
-    if errs >= 20:
-        problemi.append(f'{errs} sync gresaka u zadnja 24 h')
+                problemi['sma'] = f'SMA live kasni {h:.0f} h (zadnji {sma})'
+        except ValueError:
+            problemi['sma'] = f'SMA live: necitljiv zadnji ts ({sma})'
+
+    # (c) HEP sync pada SADA: ima ERROR zapisa, a zadnji OK je stariji od
+    # max_sync_h (ili ga nema). Kratki ispad koji se sam oporavio (OK nakon
+    # gresaka) se NE javlja. sync_log.ts je UTC 'YYYY-MM-DD HH:MM:SS' kao i
+    # datetime('now') -> usporedba istog formata.
+    try:
+        r = conn.execute("""
+            SELECT (SELECT COUNT(*) FROM sync_log WHERE status='ERROR') n_err,
+                   (SELECT MAX(ts) FROM sync_log WHERE status='OK') zadnji_ok,
+                   (SELECT COUNT(*) FROM sync_log WHERE status='OK'
+                      AND ts >= datetime('now', ?)) n_ok_svjezih
+        """, (f'-{float(max_sync_h)} hours',)).fetchone()
+    except sqlite3.OperationalError as e:
+        if 'no such table' not in str(e):
+            raise
+        r = None
+    if r and r['n_err'] and not r['n_ok_svjezih']:
+        if r['zadnji_ok']:
+            n = conn.execute("SELECT COUNT(*) c FROM sync_log WHERE status='ERROR' AND ts > ?",
+                             (r['zadnji_ok'],)).fetchone()['c']
+            problemi['sync'] = (f'HEP sync ne uspijeva: zadnji uspjesan {r["zadnji_ok"]} UTC, '
+                                f'{n} gresaka od tada')
+        else:
+            problemi['sync'] = f'HEP sync ne uspijeva: {r["n_err"]} gresaka, nijedan uspjesan sync'
+    return problemi
+
+
+def check_freshness(conn, max_hep_h=48, max_sma_h=12, max_sync_h=6):
+    """Alert ako HEP/SMA podaci kasne ili HEP sync trenutno pada.
+
+    Stanje (skup javljenih problema + vrijeme zadnje poruke) se cuva u config
+    (_freshness_state) da alert ne stize svaki sat dok ispad traje:
+      - novi problem (kojeg nema u zadnjoj poruci) -> javi odmah
+      - isti problemi traju -> ponovi najvise jednom u 24 h
+      - sve opet zdravo nakon alerta -> jedna kratka poruka "rijeseno"
+    Stanje se sprema tek nakon USPJESNOG slanja (inace bi se alert izgubio).
+    Vraca True ako ima aktivnih problema.
+    """
+    problemi = _freshness_problemi(conn, max_hep_h, max_sma_h, max_sync_h)
+    try:
+        st = json.loads(_get_cfg(conn, FRESHNESS_STATE_KEY) or '{}')
+        javljeni = set(st.get('problemi') or [])
+        zadnja = float(st.get('ts') or 0)
+    except (ValueError, TypeError, AttributeError):
+        javljeni, zadnja = set(), 0.0
+    sada = _now_ts()
+
+    def spremi(kljucevi, ts):
+        _set_cfg(conn, FRESHNESS_STATE_KEY,
+                 json.dumps({'problemi': sorted(kljucevi), 'ts': ts}))
 
     if not problemi:
-        log.info('check_freshness: OK')
+        if javljeni:
+            log.info('check_freshness: problemi rijeseni (%s)', ', '.join(sorted(javljeni)))
+            if ha_notify('Energetski Monitor — rijeseno',
+                         'Energetski Monitor: podaci ponovno stizu uredno.'):
+                spremi([], sada)
+        else:
+            log.info('check_freshness: OK')
         return False
-    poruka = 'Energetski Monitor — problemi:\n• ' + '\n• '.join(problemi)
+
+    aktivni = set(problemi)
+    poruka = 'Energetski Monitor — problemi:\n• ' + '\n• '.join(problemi[k] for k in sorted(problemi))
     log.warning(poruka.replace('\n', ' | '))
-    ha_notify('Energetski Monitor — alert', poruka)
+    novi = aktivni - javljeni
+    if novi or (sada - zadnja) >= FRESHNESS_RENOTIFY_S:
+        if ha_notify('Energetski Monitor — alert', poruka):
+            spremi(aktivni, sada)
+    else:
+        log.info('check_freshness: vec javljeno (ponavljanje najvise jednom u 24 h)')
+        if aktivni != javljeni:
+            # dio problema je nestao: suzi skup (bez poruke) da se povratak
+            # tog problema javi kao novi; vrijeme zadnje poruke ostaje
+            spremi(aktivni, zadnja)
     return True
 
 
@@ -300,7 +493,9 @@ def check_anomaly(conn, threshold_perc=None, min_samples=3, min_avg_kwh=1.0,
     Postupni sezonski rast digne i rolling-14 prosjek pa razlika nestaje;
     pravi jednodnevni skok probija oba. Uz to mora preci apsolutni kWh prag
     (ANOMALY_MIN_ABS_KWH, default 3) da se filtrira sum na malim brojkama.
-    Notifikacija max jednom po datumu.
+    Notifikacija max jednom po datumu. Ocjenjuje se samo dan za koji
+    ocitanja_15min ima cijeli dan; nepotpun dan se preskace BEZ markera pa se
+    provjeri kasnije, kad HEP isporuci ostatak.
     """
     if threshold_perc is None:
         try:
@@ -313,15 +508,24 @@ def check_anomaly(conn, threshold_perc=None, min_samples=3, min_avg_kwh=1.0,
         except ValueError:
             min_abs_kwh = 3.0
 
-    zadnji = conn.execute(
+    kandidati = conn.execute(
         'SELECT datum, ROUND(SUM(kwh_plus),2) kp FROM ocitanja_dnevna '
-        'GROUP BY datum ORDER BY datum DESC LIMIT 1').fetchone()
-    if not zadnji or not zadnji['kp']:
+        'GROUP BY datum ORDER BY datum DESC LIMIT 7').fetchall()
+    if not kandidati:
+        log.info('check_anomaly: nema dnevnih podataka')
+        return False
+    # najnoviji KOMPLETAN dan (najnoviji red je cesto tek djelomicno isporucen)
+    zadnji = next((r for r in kandidati if _dan_kompletan(conn, r['datum'])), None)
+    if zadnji is None:
+        log.info('check_anomaly: %s jos nije kompletan — preskacem (bez markera)',
+                 kandidati[0]['datum'])
+        return False
+    if not zadnji['kp']:
         log.info('check_anomaly: nema dnevnih podataka')
         return False
     datum, kp = zadnji['datum'], zadnji['kp']
 
-    if _get_cfg(conn, '_anomaly_last_date') == datum:
+    if _get_cfg(conn, '_anomaly_last_date') >= datum:
         log.info('check_anomaly: %s vec provjeren', datum)
         return False
 
@@ -340,10 +544,10 @@ def check_anomaly(conn, threshold_perc=None, min_samples=3, min_avg_kwh=1.0,
             GROUP BY datum
         )
     ''', (datum, datum)).fetchone()
-    _set_cfg(conn, '_anomaly_last_date', datum)
 
     if not wd or (wd['n'] or 0) < min_samples or (wd['avg_kp'] or 0) < min_avg_kwh:
         log.info('check_anomaly: premalo referentnih dana (%s)', wd['n'] if wd else 0)
+        _set_cfg(conn, '_anomaly_last_date', datum)
         return False
     avg_wd = wd['avg_kp']
     avg_roll = roll['avg_kp'] if roll and (roll['n'] or 0) >= min_samples else avg_wd
@@ -354,11 +558,38 @@ def check_anomaly(conn, threshold_perc=None, min_samples=3, min_avg_kwh=1.0,
     # Mora probiti prag u OBA okvira + apsolutni minimum nad oba prosjeka
     if (odst_wd < threshold_perc or odst_roll < threshold_perc
             or (kp - avg_wd) < min_abs_kwh or (kp - avg_roll) < min_abs_kwh):
+        _set_cfg(conn, '_anomaly_last_date', datum)
         return False
-    ha_notify('Energetski Monitor — anomalija potrosnje',
-              f'{datum}: potrosnja {kp:.1f} kWh je {odst_wd:.0f}% iznad prosjeka za taj dan u '
-              f'tjednu ({avg_wd:.1f} kWh) i {odst_roll:.0f}% iznad prosjeka zadnjih 14 dana ({avg_roll:.1f} kWh).')
+    # marker tek nakon uspjesnog slanja — inace se alert izgubi kad su kanali dolje
+    if not ha_notify('Energetski Monitor — anomalija potrosnje',
+                     f'{datum}: potrosnja {kp:.1f} kWh je {odst_wd:.0f}% iznad prosjeka za taj dan u '
+                     f'tjednu ({avg_wd:.1f} kWh) i {odst_roll:.0f}% iznad prosjeka zadnjih 14 dana ({avg_roll:.1f} kWh).'):
+        return False
+    _set_cfg(conn, '_anomaly_last_date', datum)
     return True
+
+
+def _dan_kompletan(conn, datum):
+    """Ima li ocitanja_15min cijeli dan `datum` za svako mjerno mjesto tog dana.
+
+    HEP uzorak nosi oznaku KRAJA intervala: dan D cine uzorci D 00:15:00 ..
+    D+1 00:00:00. Normalno 96; prihvaca se 92-100 zbog dana s pomakom sata.
+    """
+    try:
+        sutra = (datetime.fromisoformat(datum) + timedelta(days=1)).strftime('%Y-%m-%d')
+        rows = conn.execute('''
+            SELECT d.mjerno_mjesto m,
+                   (SELECT COUNT(*) FROM ocitanja_15min q
+                     WHERE q.mjerno_mjesto = d.mjerno_mjesto
+                       AND q.ts > ? AND q.ts <= ?) n
+            FROM ocitanja_dnevna d WHERE d.datum = ?
+            GROUP BY d.mjerno_mjesto
+        ''', (f'{datum}T00:00:00', f'{sutra}T00:00:00', datum)).fetchall()
+    except (sqlite3.OperationalError, ValueError) as e:
+        if isinstance(e, sqlite3.OperationalError) and 'no such table' not in str(e):
+            raise
+        return False
+    return bool(rows) and all(92 <= r['n'] <= 100 for r in rows)
 
 
 # ---------- 6. Podsjetnik za upload HEP racuna ----------
@@ -371,21 +602,26 @@ def bill_reminder(conn, od_dana=10):
         return False
     prvi_ovaj_mj = now.replace(day=1)
     prosli = prvi_ovaj_mj - timedelta(days=1)
-    period = f'{prosli.month:02d}/{prosli.year}'   # racuni.period format MM/YYYY
+    period = f'{prosli.month:02d}/{prosli.year}'       # prikaz u poruci
+    # racuni.period je 'YYYY-MM' (dashboard/racuni.py normaliziraju prije
+    # spremanja); stari 'MM/YYYY' se i dalje prihvaca
+    period_iso = f'{prosli.year}-{prosli.month:02d}'
 
     ovaj_mj = now.strftime('%Y-%m')
     if _get_cfg(conn, '_bill_reminder_last') == ovaj_mj:
         return False
     try:
-        ima = conn.execute('SELECT 1 FROM racuni WHERE period=?', (period,)).fetchone()
+        ima = conn.execute('SELECT 1 FROM racuni WHERE period IN (?, ?)',
+                           (period_iso, period)).fetchone()
     except sqlite3.Error:
         return False   # tablica jos ne postoji (svjezа instalacija)
     if ima:
         return False
+    if not ha_notify('Energetski Monitor — racun',
+                     f'HEP racun za {period} jos nije unesen. Uploadaj PDF u Racuni tab — '
+                     'projekcija duga je tocnija sa svakim racunom.'):
+        return False   # nije poslano — bez markera, pokusaj opet sutra
     _set_cfg(conn, '_bill_reminder_last', ovaj_mj)
-    ha_notify('Energetski Monitor — racun',
-              f'HEP racun za {period} jos nije unesen. Uploadaj PDF u Racuni tab — '
-              'projekcija duga je tocnija sa svakim racunom.')
     log.info('bill_reminder: poslan podsjetnik za %s', period)
     return True
 
@@ -439,12 +675,14 @@ def restore_drill(conn, every_days=30):
     except sqlite3.Error as e:
         problemi.append(f'ne mogu otvoriti backup: {e}')
 
-    _set_cfg(conn, '_restore_drill_last', today)
     if problemi:
         poruka = f'Restore drill NEUSPJESAN ({os.path.basename(latest)}):\n• ' + '\n• '.join(problemi)
         log.error(poruka.replace('\n', ' | '))
-        ha_notify('Energetski Monitor — backup PROBLEM', poruka)
+        # cadence marker samo ako je alert stigao — inace ponovi drill sutra
+        if ha_notify('Energetski Monitor — backup PROBLEM', poruka):
+            _set_cfg(conn, '_restore_drill_last', today)
         return False
+    _set_cfg(conn, '_restore_drill_last', today)
     log.info('restore_drill: OK (%s vracljiv)', os.path.basename(latest))
     return True
 
@@ -465,11 +703,11 @@ def check_offsite(conn, max_age_days=2, remind_disabled_days=30):
                     return False
             except ValueError:
                 pass
-        _set_cfg(conn, '_offsite_warn_last', today)
         log.warning('check_offsite: off-site iskljucen — backupi su samo na lokalnom volumenu')
-        ha_notify('Energetski Monitor — backup',
-                  'Off-site backup je iskljucen. Backupi baze zive samo na istom volumenu '
-                  'kao i baza — gubitak volumena znaci gubitak svega. Postavi OFFSITE_BACKUP_MODE.')
+        if ha_notify('Energetski Monitor — backup',
+                     'Off-site backup je iskljucen. Backupi baze zive samo na istom volumenu '
+                     'kao i baza — gubitak volumena znaci gubitak svega. Postavi OFFSITE_BACKUP_MODE.'):
+            _set_cfg(conn, '_offsite_warn_last', today)
         return False
 
     # ukljucen — provjeri marker zadnjeg uspjesnog uploada (pise offsite_backup.sh)
@@ -515,11 +753,12 @@ def check_token_age(conn, max_age_days=90):
     ovaj_mj = today[:7]
     if _get_cfg(conn, '_token_age_warn_month') == ovaj_mj:
         return False
-    _set_cfg(conn, '_token_age_warn_month', ovaj_mj)
     log.warning('check_token_age: tajne stare %d dana (od %s)', dana, updated)
-    ha_notify('Energetski Monitor — sigurnost',
-              f'HEP/SMA/HA tajne su stare {dana} dana (zadnja promjena {updated[:10]}). '
-              'Razmisli o rotaciji tokena/lozinki u Postavkama.')
+    if not ha_notify('Energetski Monitor — sigurnost',
+                     f'HEP/SMA/HA tajne su stare {dana} dana (zadnja promjena {updated[:10]}). '
+                     'Razmisli o rotaciji tokena/lozinki u Postavkama.'):
+        return False
+    _set_cfg(conn, '_token_age_warn_month', ovaj_mj)
     return True
 
 
@@ -532,6 +771,9 @@ def check_inverter_balance(conn, threshold_pp=None, min_day_kwh=None):
     jedan podbacuje. Baseline = medijan udjela zadnjih 60 dobrih dana.
     Okida na zadnji KOMPLETAN dan (ne danas), samo iznad min_day_kwh (da nema
     laznih alarma po oblacnim danima), max jednom po datumu.
+    Dan se bira po UKUPNOJ proizvodnji (NULL = 0): inverter koji nije dao nista
+    ima udio 0% => maksimalno odstupanje (mrtav inverter mora okinuti alarm).
+    Baseline se i dalje racuna samo iz zdravih dana (oba > 0).
     """
     if threshold_pp is None:
         try: threshold_pp = float(os.environ.get('INV_BALANCE_THRESHOLD_PP', '8'))
@@ -540,18 +782,18 @@ def check_inverter_balance(conn, threshold_pp=None, min_day_kwh=None):
         try: min_day_kwh = float(os.environ.get('INV_BALANCE_MIN_KWH', '20'))
         except ValueError: min_day_kwh = 20.0
 
+    # sma_dnevna.datum je LOKALNI dan -> 'danas' takodjer lokalno
     row = conn.execute(
-        "SELECT datum, pv_kwh_inv1 i1, pv_kwh_inv2 i2 FROM sma_dnevna "
-        "WHERE datum < date('now') AND pv_kwh_inv1 > 0 AND pv_kwh_inv2 > 0 "
-        "ORDER BY datum DESC LIMIT 1").fetchone()
+        "SELECT datum, COALESCE(pv_kwh_inv1,0) i1, COALESCE(pv_kwh_inv2,0) i2 FROM sma_dnevna "
+        "WHERE datum < date('now','localtime') "
+        "AND COALESCE(pv_kwh_inv1,0) + COALESCE(pv_kwh_inv2,0) >= ? "
+        "AND COALESCE(pv_kwh_inv1,0) + COALESCE(pv_kwh_inv2,0) > 0 "
+        "ORDER BY datum DESC LIMIT 1", (min_day_kwh,)).fetchone()
     if not row:
-        log.info('check_inverter_balance: nema po-inverterskih podataka')
+        log.info('check_inverter_balance: nema dana s dovoljno proizvodnje (>= %.1f kWh)', min_day_kwh)
         return False
     datum, i1, i2 = row['datum'], row['i1'], row['i2']
     tot = i1 + i2
-    if tot < min_day_kwh:
-        log.info('check_inverter_balance: %s premalo proizvodnje (%.1f kWh)', datum, tot)
-        return False
     share1 = i1 / tot * 100
 
     base = conn.execute(
@@ -572,17 +814,19 @@ def check_inverter_balance(conn, threshold_pp=None, min_day_kwh=None):
     if _get_cfg(conn, '_inv_balance_last_date') == datum:
         log.info('check_inverter_balance: %s vec javljen', datum)
         return False
-    _set_cfg(conn, '_inv_balance_last_date', datum)
     losi = 'INV1' if dev < 0 else 'INV2'
+    stanje = 'NE PROIZVODI' if min(i1, i2) <= 0 else 'podbacuje'
     poruka = (f'Inverter disbalans {datum}: INV1={i1:.1f} kWh ({share1:.0f}%), '
-              f'INV2={i2:.1f} kWh ({100-share1:.0f}%). {losi} podbacuje '
+              f'INV2={i2:.1f} kWh ({100-share1:.0f}%). {losi} {stanje} '
               f'(INV1 normalno ~{med:.0f}%). Provjeri string/MPPT/panele/zasjenjenje.')
     log.warning(poruka)
-    ha_notify('Energetski Monitor — inverter', poruka)
+    if not ha_notify('Energetski Monitor — inverter', poruka):
+        return False   # bez markera — pokusaj opet pri sljedecem pokretanju
+    _set_cfg(conn, '_inv_balance_last_date', datum)
     return True
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument('--all', action='store_true')
     ap.add_argument('--backfill-daily', action='store_true')
@@ -597,39 +841,52 @@ def main():
     ap.add_argument('--restore-drill', action='store_true')
     ap.add_argument('--check-offsite', action='store_true')
     ap.add_argument('--check-token-age', action='store_true')
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
+
+    # (ime koraka, ukljucen?, poziv) — redoslijed je bitan (normalize prije backfilla)
+    koraci = [
+        ('backfill-range',  bool(a.backfill_range),
+         lambda c: backfill_range(c, a.backfill_range[0], a.backfill_range[1])),
+        ('normalize-ts',    a.all or a.normalize_ts,    lambda c: normalize_ts(c)),
+        ('backfill-daily',  a.all or a.backfill_daily,  lambda c: backfill_daily(c)),
+        ('prune-live',      a.all or a.prune_live,      lambda c: prune_live(c, a.keep_days)),
+        ('check-freshness', a.all or a.check_freshness, lambda c: check_freshness(c)),
+        ('check-anomaly',   a.all or a.check_anomaly,   lambda c: check_anomaly(c)),
+        ('check-inverter',  a.all or a.check_inverter,  lambda c: check_inverter_balance(c)),
+        ('bill-reminder',   a.all or a.bill_reminder,   lambda c: bill_reminder(c)),
+        ('restore-drill',   a.all or a.restore_drill,   lambda c: restore_drill(c)),
+        ('check-offsite',   a.all or a.check_offsite,   lambda c: check_offsite(c)),
+        ('check-token-age', a.all or a.check_token_age, lambda c: check_token_age(c)),
+    ]
+    aktivni = [(ime, fn) for ime, ukljucen, fn in koraci if ukljucen]
+    if not aktivni:
+        ap.print_help()
+        return 0
 
     conn = _conn()
+    pali = []
     try:
-        if a.backfill_range:
-            backfill_range(conn, a.backfill_range[0], a.backfill_range[1])
-        if a.all or a.normalize_ts:
-            normalize_ts(conn)
-        if a.all or a.backfill_daily:
-            backfill_daily(conn)
-        if a.all or a.prune_live:
-            prune_live(conn, a.keep_days)
-        if a.all or a.check_freshness:
-            check_freshness(conn)
-        if a.all or a.check_anomaly:
-            check_anomaly(conn)
-        if a.all or a.check_inverter:
-            check_inverter_balance(conn)
-        if a.all or a.bill_reminder:
-            bill_reminder(conn)
-        if a.all or a.restore_drill:
-            restore_drill(conn)
-        if a.all or a.check_offsite:
-            check_offsite(conn)
-        if a.all or a.check_token_age:
-            check_token_age(conn)
-        if not any([a.all, a.backfill_daily, a.normalize_ts, a.prune_live,
-                    a.backfill_range, a.check_freshness, a.check_anomaly,
-                    a.bill_reminder, a.restore_drill, a.check_offsite,
-                    a.check_token_age]):
-            ap.print_help()
+        for ime, fn in aktivni:
+            # svaki korak izoliran: greska u jednom (npr. "database is locked")
+            # ne smije preskociti ostale
+            try:
+                fn(conn)
+            except Exception as e:
+                pali.append(ime)
+                # sqlite poruka je bezopasna i korisna; za ostale samo tip
+                # (tekst mrezne iznimke moze sadrzavati URL)
+                detalj = f': {e}' if isinstance(e, (sqlite3.Error, ValueError, KeyError)) else ''
+                log.error('korak %s NEUSPJESAN: %s%s', ime, type(e).__name__, detalj)
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
     finally:
         conn.close()
+    if pali:
+        log.error('maintenance: neuspjeli koraci: %s', ', '.join(pali))
+        return 1
+    return 0
 
 
 if __name__ == '__main__':
