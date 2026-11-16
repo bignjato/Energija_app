@@ -21,7 +21,7 @@ def get_db():
 
 
 # Trenutna verzija sheme. Povećaj kad dodaš migraciju u _run_migrations.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _get_schema_version(conn) -> int:
@@ -77,9 +77,21 @@ def init_db():
         )
     ''')
 
+    # Cijene s parsiranog PDF računa čekaju ovdje dok korisnik ne potvrdi unos
+    # (upload-pdf → preview → POST /api/racuni); vidi blueprints/racuni.py.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS racuni_cijene_pdf (
+            period TEXT PRIMARY KEY,
+            cijene_json TEXT NOT NULL,
+            broj_racuna TEXT,
+            stvoren TEXT DEFAULT (datetime('now'))
+        )
+    ''')
+
     # Verzionirane migracije (gate-ane schema_version tablicom).
     from_v = _get_schema_version(conn)
     _run_migrations(conn, from_v)
+    _ensure_indexes(conn)
 
     count = conn.execute('SELECT COUNT(*) FROM korisnici').fetchone()[0]
     if count == 0:
@@ -162,6 +174,32 @@ def _run_migrations(conn, from_v: int):
             if col not in existing:
                 conn.execute(f'ALTER TABLE racuni ADD COLUMN {col} {typ}')
                 log.info('Migracija v1: dodana racuni.%s', col)
+
+    # v2: jedinične cijene s računa (JSON) — tariff.get_tarifa ih čita
+    if from_v < 2:
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(racuni)").fetchall()}
+        if 'cijene_json' not in existing:
+            conn.execute('ALTER TABLE racuni ADD COLUMN cijene_json TEXT')
+            log.info('Migracija v2: dodana racuni.cijene_json')
+
+
+def _ensure_indexes(conn):
+    """Indeksi samo po vremenu (upiti bez mjerno_mjesto filtera).
+
+    Nije version-gate-ano: tablice očitanja kreiraju scraper skripte, pa na
+    svježoj instalaciji još ne postoje — preskoči i pokušaj opet idući start.
+    """
+    indeksi = [
+        ('idx_15min_ts_only',     'ocitanja_15min',  'ts'),
+        ('idx_satna_ts_only',     'ocitanja_satna',  'ts'),
+        ('idx_dnevna_datum_only', 'ocitanja_dnevna', 'datum'),
+        ('idx_sma_live_ts',       'sma_live',        'ts'),
+    ]
+    for naziv, tablica, kolona in indeksi:
+        try:
+            conn.execute(f'CREATE INDEX IF NOT EXISTS {naziv} ON {tablica}({kolona})')
+        except sqlite3.OperationalError as e:
+            log.debug('Indeks %s preskočen: %s', naziv, e)
 
 
 def get_config(key, default=''):

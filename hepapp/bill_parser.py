@@ -14,6 +14,12 @@ Polja:
     opskrba      : float
     mreza        : float
     pdv          : float
+    cijene       : dict — jedinične cijene otisnute na računu (EUR), ključevi kao
+                   u tariff.py: vt_opskrba, nt_opskrba, vt_distrib, nt_distrib,
+                   vt_prijenos, nt_prijenos, solidarna, oie, opskrbna_mj,
+                   mjerna_mj (+ vt_otkup/otkup kad se da izvesti iz otkupa).
+                   Linija koje nema na računu → ključa nema.
+    otkup_kwh / otkup_eur : float — "OTKUP: ... otkupili 546 kWh ... za 42,45 eura"
 """
 
 import io
@@ -67,6 +73,65 @@ def extract_text(pdf_bytes: bytes) -> str:
         raise RuntimeError('pdfplumber nije instaliran u image-u')
 
 
+def _to_kwh(s):
+    """Količina kWh; '1.079' je tisuću sedamdeset devet (točka = tisućice)."""
+    s = str(s).strip().rstrip('.,')
+    if re.fullmatch(r'-?\d{1,3}(?:\.\d{3})+', s):
+        s = s.replace('.', '')
+    return _to_float(s)
+
+
+# "viša tarifa po 0,077751 EUR/kWh -546 0,00"                 → opskrba
+# "distribucija - viša tarifa po 0,044446 EUR/kWh -546 0,00"  → distribucija
+# "prijenos - niža tarifa po 0,008175 EUR/kWh 593 4,85"       → prijenos
+# pdfplumber spaja lijevi (opskrba) i desni (mreža) stupac u istu liniju, pa
+# se prefiks hvata u ISTOM uzorku — inače bi "viša tarifa po" iz distribucije
+# ili prijenosa prošla kao cijena opskrbe.
+# Ispod ove količine se otkupna cijena ne izvodi dijeljenjem (iznos je zaokružen na cent).
+_MIN_KWH_ZA_CIJENU_OTKUPA = 100
+
+_TARIFA_PO_RE = re.compile(
+    r'(?:(distribucija|prijenos)\s*[-–]\s*)?(vi[šs]a|ni[žz]a)\s+tarifa\s+po\s+'
+    r'(\d+[.,]\d+)\s*EUR\s*/\s*kWh(?:[ \t]+(-?\d[\d\.]*))?',
+    flags=re.IGNORECASE,
+)
+
+_NAKNADE_RE = {
+    'solidarna':   r'solidarna\s+naknada\s+po\s+(\d+[.,]\d+)\s*EUR\s*/\s*kWh',
+    'oie':         r'obnovljivi\s+izvori\s+po\s+(\d+[.,]\d+)\s*EUR\s*/\s*kWh',
+    'opskrbna_mj': r'opskrbna\s*naknada\s*po\s*(\d+[.,]\d+)\s*EUR/mjesec',
+    'mjerna_mj':   r'naknada\s*za\s*mjernu\s*uslugu[^0-9\n]{0,40}(\d+[.,]\d+)\s*EUR',
+}
+
+
+def _parse_cijene(text: str):
+    """Jedinične cijene otisnute na računu.
+
+    Vraća (cijene, saldo_vt, saldo_nt); saldo je količina uz liniju opskrbe
+    (negativno = višak predan u mrežu) ili None ako je nema.
+    """
+    cijene = {}
+    saldo = {'vt': None, 'nt': None}
+    for m in _TARIFA_PO_RE.finditer(text):
+        tarifa = 'vt' if m.group(2).lower().startswith('vi') else 'nt'
+        stavka = {'distribucija': 'distrib', 'prijenos': 'prijenos'}.get(
+            (m.group(1) or '').lower(), 'opskrba')
+        kljuc = f'{tarifa}_{stavka}'
+        if kljuc in cijene:
+            continue  # prva pojava vrijedi (račun s dva obračunska razdoblja)
+        c = _to_float(m.group(3))
+        if c is None:
+            continue
+        cijene[kljuc] = c
+        if stavka == 'opskrba' and m.group(4):
+            saldo[tarifa] = _to_kwh(m.group(4))
+    for kljuc, uzorak in _NAKNADE_RE.items():
+        c = _to_float(_search([uzorak], text))
+        if c is not None:
+            cijene[kljuc] = c
+    return cijene, saldo['vt'], saldo['nt']
+
+
 def parse_hep_bill(text: str) -> dict:
     res = {
         'period': None, 'od': None, 'do': None,
@@ -84,6 +149,9 @@ def parse_hep_bill(text: str) -> dict:
         'model_tarife': None,        # npr. "HEPI bijeli — E-K-N-BIJ1"
         'sifra_kupca': None,
         'broj_racuna': None,
+        'cijene': {},                # jedinične cijene s računa (vidi _parse_cijene)
+        'otkup_kwh': None,           # "OTKUP: ... otkupili 546 kWh ... za 42,45 eura"
+        'otkup_eur': None,
         'raw_excerpt': text[:2000],
     }
 
@@ -124,19 +192,7 @@ def parse_hep_bill(text: str) -> dict:
         if m2:
             iznos = _to_float(m2.group(2))
 
-    # Strategija 2: nedopustivo nisko (parser našao komponentu) → koristi sumu
-    if iznos is None or iznos < 5:
-        components = [res.get('opskrba'), res.get('mreza'), res.get('pdv')]
-        # Kamata (opcionalno)
-        kamata = _to_float(_search([
-            r'Kamata[^\n]{0,80}?(\d{1,4}[\.,]\d{2})\s*€',
-        ], text))
-        if kamata:
-            components.append(kamata)
-        s = sum(c for c in components if c is not None)
-        if s > 0:
-            iznos = round(s, 2)
-    res['iznos'] = iznos
+    # Strategija 2 (suma komponenti) je niže — tek nakon što su komponente parsirane.
 
     # --- POTROŠNJA VT/NT ---
     # "viša tarifa - potrošnja    549"
@@ -212,6 +268,47 @@ def parse_hep_bill(text: str) -> dict:
     res['kamata'] = _to_float(_search([
         r'Kamata[^\n]{0,80}?([\d\.,]+)\s*€',
     ], text))
+
+    # --- Ukupni iznos, strategija 2 ---
+    # Nema desnog boxa ili je nedopustivo nizak (parser uhvatio komponentu) →
+    # opskrba + mreža + PDV (+ kamata). Mora biti OVDJE, nakon parsiranja
+    # komponenti; sama kamata bez opskrbe/mreže nije iznos računa.
+    if iznos is None or iznos < 5:
+        if res['opskrba'] is not None or res['mreza'] is not None:
+            components = [res['opskrba'], res['mreza'], res['pdv'], res['kamata']]
+            s = sum(c for c in components if c is not None)
+            if s > 0:
+                iznos = round(s, 2)
+    res['iznos'] = iznos
+
+    # --- Jedinične cijene + otkup ---
+    res['cijene'], saldo_vt, saldo_nt = _parse_cijene(text)
+    m = re.search(
+        r'OTKUP:[\s\S]{0,80}?otkupili\s+(\d[\d\.,]*)\s*kWh[\s\S]{0,80}?za\s+(\d[\d\.,]*)\s*eur',
+        text, flags=re.IGNORECASE,
+    )
+    if m:
+        res['otkup_kwh'] = _to_kwh(m.group(1))
+        res['otkup_eur'] = _to_float(m.group(2).rstrip('.,'))
+    # Otkupna cijena se da izvesti samo kad je višak čisto VT (VT saldo < 0,
+    # NT saldo >= 0) i otkupljena količina odgovara tom višku. Za NT višak
+    # cijenu ne nagađamo.
+    if (res['otkup_kwh'] and res['otkup_eur'] and
+            saldo_vt is not None and saldo_vt < 0 and
+            saldo_nt is not None and saldo_nt >= 0 and
+            abs(res['otkup_kwh'] + saldo_vt) <= 1):
+        # Iznos otkupa je zaokružen na cent, pa je eur/kWh samo približan. Ako
+        # se iznos slaže s VT cijenom opskrbe s istog računa, to je točna
+        # cijena; inače dijelimo samo kad je količina dovoljna da cent ne
+        # smeta (>= 100 kWh → greška < 0,1 %). Ispod toga ključ izostaje.
+        vt = res['cijene'].get('vt_opskrba')
+        c = None
+        if vt and abs(round(res['otkup_kwh'] * vt, 2) - res['otkup_eur']) < 0.005:
+            c = vt
+        elif res['otkup_kwh'] >= _MIN_KWH_ZA_CIJENU_OTKUPA:
+            c = round(res['otkup_eur'] / res['otkup_kwh'], 6)
+        if c is not None:
+            res['cijene']['vt_otkup'] = res['cijene']['otkup'] = c
 
     # --- Datum računa & dospijeća ---
     m = re.search(r'Datum\s*ra[čc]una[:\s]*(\d{1,2})\.(\d{1,2})\.(\d{4})', text, flags=re.IGNORECASE)

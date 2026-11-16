@@ -5,13 +5,25 @@ Podržava dva modela:
   - 'bijeli' (HEPI bijeli / E-K-N-BIJ1): net-metering, saldiranje po tarifi mjesečno;
     samo pozitivni saldo se plaća, viškovi otkupljuju zasebnim transferom.
 
+Cijene: ugrađeni cjenik po datumu (TARIFE), preko kojeg idu jedinične cijene
+sa zadnjeg uvezenog računa — vidi `get_tarifa`.
+
 VT_UDIO_PERC se može override-ati preko config tablice (key: VT_UDIO_PERC, 0–100).
 Tipično: ljeto ~35, prosjek ~45, zima ~55.
 """
 
+import json
+import logging
+import os
+import re
+import threading
+import time
 from datetime import date, datetime
 
+from . import db as _db
 from .db import get_config
+
+log = logging.getLogger(__name__)
 
 # Stavke koje se nisu mijenjale između cjenika (mreža, naknade, PDV).
 _ZAJEDNICKO = {
@@ -31,6 +43,8 @@ _ZAJEDNICKO = {
 # novi red na vrh (ne mijenjaj stare: povijesni mjeseci se računaju po cjeniku
 # koji je tada vrijedio). Svaki cjenik je provjeren protiv stvarnog računa —
 # vidi tests/test_tariff.py (test_stvarni_racun_*).
+# Od uvoza prvog računa s novim cijenama vrijede cijene s računa (get_tarifa),
+# pa novi red ovdje treba samo za mjesece prije tog računa.
 TARIFE = [
     # Od 1.4.2026. — potvrđeno računima 04–10/2026 (npr. 10/2026: 63,39 €).
     ('2026-04-01', {
@@ -54,28 +68,249 @@ TARIFE = [
 ]
 
 
+# --- Cijene s uvezenih računa ------------------------------------------------
+# Ugrađeni cjenik je samo polazište: jedinične cijene otisnute na zadnjem
+# uvezenom računu (racuni.cijene_json, puni ga bill_parser) ga prekrivaju, pa
+# iduća HEP-ova promjena cijena ne traži izmjenu koda — dovoljno je uvesti račun.
+
+# Ključevi koje račun smije prekriti. 'pdv' i 'vt_udio' nisu cijene s računa.
+_PO_KWH = ('vt_opskrba', 'nt_opskrba', 'vt_distrib', 'nt_distrib',
+           'vt_prijenos', 'nt_prijenos', 'solidarna', 'oie',
+           'vt_otkup', 'nt_otkup', 'otkup')
+_MJESECNE = ('opskrbna_mj', 'mjerna_mj')
+
+_CACHE_TTL = 60.0   # s — i sync kontejner unutar minute vidi novi račun
+_cache = {'do': None, 'racuni': []}   # racuni: [(period 'YYYY-MM', {ključ: cijena})], najnoviji prvi
+_cache_lock = threading.Lock()
+_upozoreno = set()
+
+
+def invalidate_tarifa_cache():
+    """Zaboravi učitane cijene računa (poziva se nakon spremanja/brisanja računa)."""
+    with _cache_lock:
+        _cache['do'] = None
+        _cache['racuni'] = []
+
+
+def _norm_period(p):
+    """'YYYY-MM' (ili stari zapis 'MM/YYYY') → 'YYYY-MM'; inače None."""
+    p = str(p or '').strip()
+    if re.fullmatch(r'\d{4}-\d{2}', p):
+        return p
+    m = re.fullmatch(r'(\d{1,2})/(\d{4})', p)
+    if m:
+        return f'{m.group(2)}-{int(m.group(1)):02d}'
+    return None
+
+
+def _provjeri_cijene(period, sirovo) -> dict:
+    """Zadrži samo poznate ključeve s razumnom vrijednošću; ostalo ignoriraj uz jedno upozorenje."""
+    cijene = {}
+    if not isinstance(sirovo, dict):
+        return cijene
+    for k, v in sirovo.items():
+        if k in _PO_KWH:
+            gornja = 1.0
+        elif k in _MJESECNE:
+            gornja = 50.0
+        else:
+            continue
+        try:
+            if isinstance(v, bool):
+                raise ValueError
+            f = float(v)
+        except (TypeError, ValueError):
+            f = None
+        if f is not None and 0 < f < gornja:   # NaN pada ovdje
+            cijene[k] = f
+        elif (period, k) not in _upozoreno:
+            _upozoreno.add((period, k))
+            log.warning('Račun %s: cijena %s=%r izvan razumnog raspona — ignoriram '
+                        '(vrijedi prethodni račun ili ugrađeni cjenik)', period, k, v)
+    return cijene
+
+
+def _ucitaj_cijene_racuna() -> list:
+    """Cijene svih računa koji ih imaju (kratko keširano). Nikad ne baca iznimku:
+    nema baze / tablice / kolone ili je baza zaključana → prazna lista."""
+    now = time.monotonic()
+    with _cache_lock:
+        if _cache['do'] is not None and now < _cache['do']:
+            return _cache['racuni']
+    racuni = []
+    try:
+        # get_db() bi nepostojeću bazu kreirao praznu — standalone skripte to ne smiju
+        if os.path.exists(_db.DB_PATH):
+            conn = _db.get_db()
+            try:
+                rows = conn.execute(
+                    'SELECT period, cijene_json FROM racuni WHERE cijene_json IS NOT NULL'
+                ).fetchall()
+            finally:
+                conn.close()
+            for period_raw, cj in rows:
+                period = _norm_period(period_raw)
+                if not period:
+                    continue
+                try:
+                    cijene = _provjeri_cijene(period, json.loads(cj))
+                except (TypeError, ValueError):
+                    continue
+                if cijene:
+                    racuni.append((period, cijene))
+            racuni.sort(key=lambda r: r[0], reverse=True)
+    except Exception as e:
+        log.debug('Cijene računa nedostupne (%s) — ugrađeni cjenik', e)
+        racuni = []
+    with _cache_lock:
+        _cache['racuni'] = racuni
+        _cache['do'] = time.monotonic() + _CACHE_TTL
+    return racuni
+
+
+def _datum_str(datum) -> str:
+    if datum is None:
+        return date.today().isoformat()
+    if isinstance(datum, (date, datetime)):
+        return datum.strftime('%Y-%m-%d')
+    d = str(datum)[:10]
+    if len(d) == 7:
+        d += '-01'
+    return d
+
+
+def _ugradjeni(d: str):
+    """(vrijedi_od, cjenik) ugrađenog cjenika koji vrijedi na datum d."""
+    for vrijedi_od, cjenik in TARIFE:
+        if d >= vrijedi_od:
+            return vrijedi_od, cjenik
+    return TARIFE[-1]
+
+
+def _racun_za(d: str, vrijedi_od: str):
+    """(period, cijene) s računa koje vrijede na datum d, ili None.
+
+    Gledaju se računi s cijenama od mjeseca važenja ugrađenog cjenika do
+    uključivo mjeseca datuma — račun iz starog cjenovnog režima ne smije
+    prekriti noviji ugrađeni cjenik. Svaki ključ se uzima s najnovijeg računa
+    koji ga ima: stavka koje na zadnjem računu nema (npr. otkup u mjesecu bez
+    viška) ostaje po prethodnom računu, a ne pada na ugrađeni cjenik.
+    Period je onaj najnovijeg računa.
+    """
+    mjesec = d[:7]
+    u_rezimu = [r for r in _ucitaj_cijene_racuna()
+                if vrijedi_od[:7] <= r[0] <= mjesec]   # najnoviji prvi
+    if not u_rezimu:
+        return None
+    cijene = {}
+    for _, c in reversed(u_rezimu):
+        cijene.update(c)
+    return u_rezimu[0][0], cijene
+
+
 def get_tarifa(datum=None) -> dict:
     """Cjenik koji vrijedi na zadani datum.
 
     datum: None (danas), 'YYYY-MM-DD', 'YYYY-MM' (uzima se 1. u mjesecu),
            ili date/datetime objekt.
+
+    Redoslijed: ugrađeni cjenik za taj datum (TARIFE), preko njega cijene s
+    uvezenih računa do tog mjeseca, novije preko starijih (vidi `_racun_za`). Uvijek vraća
+    novi dict s istim ključevima; zbog baze nikad ne baca iznimku.
     """
-    if datum is None:
-        d = date.today().isoformat()
-    elif isinstance(datum, (date, datetime)):
-        d = datum.strftime('%Y-%m-%d')
-    else:
-        d = str(datum)[:10]
-        if len(d) == 7:
-            d += '-01'
-    for vrijedi_od, cjenik in TARIFE:
-        if d >= vrijedi_od:
-            return cjenik
-    return TARIFE[-1][1]
+    d = _datum_str(datum)
+    vrijedi_od, cjenik = _ugradjeni(d)
+    t = dict(cjenik)
+    racun = _racun_za(d, vrijedi_od)
+    if racun:
+        t.update(racun[1])
+    return t
+
+
+def get_tarifa_izvor(datum=None) -> str:
+    """Odakle su cijene za zadani datum: 'račun 2026-10' ili 'ugrađeni cjenik od 2026-04-01'."""
+    d = _datum_str(datum)
+    vrijedi_od, _ = _ugradjeni(d)
+    racun = _racun_za(d, vrijedi_od)
+    if racun:
+        return f'račun {racun[0]}'
+    return f'ugrađeni cjenik od {vrijedi_od}'
+
+
+class _TrenutnaTarifa(dict):
+    """HEP_TARIFA — read-only pogled na `get_tarifa()` (cjenik koji vrijedi danas).
+
+    Svako čitanje ide kroz get_tarifa(), pa pozivatelji koji drže
+    `HEP_TARIFA['...']` vide trenutne cijene bez izmjene koda.
+
+    Nasljeđuje dict (a ne samo Mapping) jer ga pozivatelji šalju ravno u
+    jsonify, a json enkoder prima samo dict; vlastiti sadržaj dict-a se pri
+    svakom čitanju osvježi da i C prečaci (json, dict.copy) vide iste cijene.
+    """
+    __slots__ = ()
+
+    def __init__(self):
+        dict.__init__(self, TARIFE[0][1])
+
+    def _t(self):
+        t = get_tarifa()
+        dict.update(self, t)
+        return t
+
+    def __getitem__(self, k):
+        return self._t()[k]
+
+    def get(self, k, default=None):
+        return self._t().get(k, default)
+
+    def __contains__(self, k):
+        return k in self._t()
+
+    def __iter__(self):
+        return iter(self._t())
+
+    def __len__(self):
+        return len(self._t())
+
+    def keys(self):
+        return self._t().keys()
+
+    def items(self):
+        return self._t().items()
+
+    def values(self):
+        return self._t().values()
+
+    def copy(self):
+        return self._t()
+
+    def __eq__(self, other):
+        return self._t() == other
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __or__(self, other):
+        return self._t() | other
+
+    def __ror__(self, other):
+        return other | self._t()
+
+    def __repr__(self):
+        return f'HEP_TARIFA({self._t()!r})'
+
+    def __reduce__(self):
+        return (dict, (self._t(),))
+
+    def _samo_citanje(self, *a, **kw):
+        raise TypeError('HEP_TARIFA je samo za čitanje — cijene dolaze iz get_tarifa()')
+
+    __setitem__ = __delitem__ = __ior__ = _samo_citanje
+    clear = pop = popitem = setdefault = update = _samo_citanje
 
 
 # Trenutno važeći cjenik (kompatibilnost sa starim pozivateljima).
-HEP_TARIFA = get_tarifa()
+HEP_TARIFA = _TrenutnaTarifa()
 
 
 def get_vt_udio() -> float:
